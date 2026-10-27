@@ -1,4 +1,4 @@
-// src/controller/ll_pdu.nv — the legacy advertising channel PDUs: the header
+// orbit/noble-radio/src/ll_pdu.nv — the legacy advertising channel PDUs: the header
 // bits, a fixed buffer for one PDU, and the builders and parsers of the
 // seven PDU types the legacy Link Layer sends and receives.
 //

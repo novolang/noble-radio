@@ -1,4 +1,4 @@
-// src/controller/ll_cipher.nv — the seam between the Link Layer and the
+// orbit/noble-radio/src/ll_cipher.nv — the seam between the Link Layer and the
 // hardware that encrypts: what the Link Layer asks of a block cipher and of
 // AES-CCM, and the keys it asks with.
 //
@@ -14,7 +14,7 @@
 //
 // There are two backends.  `SoftCipher` (`ll_ccm.nv`) is pure Novo, runs in the
 // simulation and is the answer on a chip without an AES engine; the CCM00 and
-// ECB00 peripherals of the nRF54L (`nrf54/ccm_nrf54.nv`) are the other.  The
+// ECB00 peripherals of the nRF54L (`orbit/bsp/nordic/nrf54/blocks/ccm_nrf54.nv`) are the other.  The
 // software backend is also the reference the hardware one is checked against.
 //
 // No function here allocates.

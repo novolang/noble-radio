@@ -1,4 +1,4 @@
-// src/controller/ll_phy.nv — the physical layers of the Link Layer and what a
+// orbit/noble-radio/src/ll_phy.nv — the physical layers of the Link Layer and what a
 // packet costs on each: LE 1M, LE 2M and LE Coded, the time a packet takes on
 // air, and how many payload octets a time allows.
 //

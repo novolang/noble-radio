@@ -1,4 +1,4 @@
-// src/controller/ll_radio.nv — the seam between the Link Layer's radio program
+// orbit/noble-radio/src/ll_radio.nv — the seam between the Link Layer's radio program
 // and the radio: what the program (`ll_air.nv`) asks of a transceiver and of a
 // clock, and the constants of LE 1M that both sides share.
 //
@@ -33,7 +33,7 @@
 // The program and a backend meet the same way the Link Layer and a cipher meet
 // (`ll_cipher.nv`): the program is generic over `R: Radio[e] + Timebase[e]`,
 // so it costs the backend's effects and no call goes through a table.  The
-// backends are `Nrf54Air` (`nrf54/radio_nrf54.nv`) and the scripted air of
+// backends are `Nrf54Air` (`orbit/bsp/nordic/nrf54/blocks/radio_nrf54.nv`) and the scripted air of
 // `tests/ctl_air_tests.nv`, which runs the program on a PC.
 //
 // No function here allocates.

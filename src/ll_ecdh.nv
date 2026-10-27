@@ -1,4 +1,4 @@
-// src/controller/ll_ecdh.nv — the seam between the Controller and the P-256 of the chip.
+// orbit/noble-radio/src/ll_ecdh.nv — the seam between the Controller and the P-256 of the chip.
 //
 // LE Read Local P-256 Public Key and LE Generate DHKey ([Vol 4] Part E, Sections 7.8.36 and
 // 7.8.37) ask the Controller for the public key of a private key it keeps and for the
