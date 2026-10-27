@@ -1,0 +1,444 @@
+// src/controller/ll_radio.nv — the seam between the Link Layer's radio program
+// and the radio: what the program (`ll_air.nv`) asks of a transceiver and of a
+// clock, and the constants of LE 1M that both sides share.
+//
+// The Link Layer decides what goes on air and when ([Vol 6] Part B); the
+// radio program carries the decision out, one packet at a time, with the
+// interframe space T_IFS of 150 microseconds between a packet and its answer.
+// A radio that can time that turn-around by itself (every radio of the chips
+// in view can: the nRF52 and nRF54 RADIO with its shortcuts, the TI CC23xx
+// and the others with a hardware sequencer) starts the answer with no software
+// in the path, and the program uses the time in between to decide what the
+// answer is.  The program therefore asks a `Radio` for five things and does
+// not know which registers answer:
+//
+//   configure   the access address, CRC seed, longest payload and channel
+//   chain       what the radio does by itself after a packet: stop, turn to
+//               the transmitter or turn to the receiver, and sample the RSSI
+//               at the access address
+//   start       the transmitter or the receiver, at the time given
+//   events      whether the access address, the end of the packet and the
+//               CRC verdict have come, and the waits for them
+//   packets     five buffers the radio moves packets to and from
+//
+// and a `Timebase` for the clock: the Link Layer's time in microseconds and
+// two counters to measure spans with.
+//
+// What stays in the backend.  The register layer, the interrupt and event
+// routing (DPPI on the nRF54), the clock and power requests, the errata of
+// the chip, and every bounded spin on a flag.  What stays in the program: the
+// order of the packets in an event, T_IFS, the windows, the judgement of every
+// packet and the statistics.
+//
+// The program and a backend meet the same way the Link Layer and a cipher meet
+// (`ll_cipher.nv`): the program is generic over `R: Radio[e] + Timebase[e]`,
+// so it costs the backend's effects and no call goes through a table.  The
+// backends are `Nrf54Air` (`nrf54/radio_nrf54.nv`) and the scripted air of
+// `tests/ctl_air_tests.nv`, which runs the program on a PC.
+//
+// No function here allocates.
+
+use ll_pdu
+use ll_phy
+use std.test
+
+// LE 1M: the preamble (1 octet) and the access address (4 octets) take 40
+// microseconds, and the access address ends at that time after the first bit.  The
+// advertising channels use LE 1M; `ll_phy.aa_end_us` gives the time of the other PHYs
+// a connection may use.
+pub const AA_END_US = 40
+
+// The interframe space, in microseconds ([Vol 6] Part B, Section 4.1.1).
+pub const T_IFS_US = 150
+
+// The advertising channels' access address and CRC seed ([Vol 6] Part B,
+// Section 2.1.2 and 1.4.1), and the longest payload with the header of an
+// advertising PDU (37 octets, the PDU's length field with the AdvA).
+pub const ADV_ACCESS_ADDRESS = 0x8E89BED6
+pub const ADV_CRC_INIT = 0x555555
+pub const ADV_MAXLEN = 37
+
+// The longest payload of an extended advertising PDU on a primary channel: its length field is 6 bits wide.  A scanner of the extended
+// commands receives that much on the primary channels.
+pub const EXT_PRIMARY_MAXLEN = 63
+
+// The longest data PDU the radio accepts: 251 octets of payload with the Data Length
+// Extension, and 4 more for the MIC of an encrypted one.
+pub const DATA_MAXLEN = 255
+
+// The packet buffers.  A backend gives each 260 octets (the header and a payload of
+// at most 255 octets, which a copy by words rounds up to 260):
+//
+//   BUF_TX    the advertisement or request being sent
+//   BUF_RX    the packet being received
+//   BUF_ANS   the answer sent T_IFS after a request
+//   BUF_CUR   the data PDU in flight
+//   BUF_NXT   the data PDU that follows it
+pub const BUF_TX = 0
+pub const BUF_RX = 1
+pub const BUF_ANS = 2
+pub const BUF_CUR = 3
+pub const BUF_NXT = 4
+
+// What the radio does by itself when a packet ends (`arm`): rests, or turns to
+// the transmitter, or to the receiver, T_IFS after the end.
+pub const THEN_REST = 0
+pub const THEN_TX = 1
+pub const THEN_RX = 2
+
+// What `turnaround_ns` answers when the backend cannot measure the turn-around.
+pub const NOT_MEASURED = -1
+
+// What `wait_rx` found: the packet did not end in time, ended with a good CRC,
+// or ended with a CRC error.
+pub const RX_TIMEOUT = 0
+pub const RX_GOOD = 1
+pub const RX_BAD = 2
+
+// The clock of the Link Layer.
+pub trait Timebase[e]
+    // The time in microseconds, on 64 bits, from the start of the clock.  It
+    // never goes back.  A backend that extends a narrower counter needs a call
+    // at least as often as the counter wraps (134 seconds on the nRF54).
+    fn now_us(var self) -> Int [e]
+    // A free-running counter of the finest resolution the backend has, 32 bits,
+    // for the length of short spans: `(stamp() - t0) & 0xFFFFFFFF`.  It ticks
+    // `stamps_per_us` times a microsecond.
+    fn stamp(var self) -> Int [e]
+    fn stamps_per_us(var self) -> Int [e]
+    // The core's cycle counter, for the statistics of how long a piece of
+    // software took; 0 when the core has none.
+    fn cycles(var self) -> Int [e]
+    // Return once `now_us()` has reached `t`, or after a bound that a clock
+    // which stopped cannot hold.
+    fn wait_until(var self, t: Int) [e]
+
+// The transceiver, LE 1M.
+pub trait Radio[e]
+    // The microseconds from `start_tx` to the first bit on air, and from
+    // `start_rx` to a receiver that is listening: the program starts the radio
+    // this long before the time it wants.
+    fn tx_lead_us(var self) -> Int [e]
+    fn rx_lead_us(var self) -> Int [e]
+    // Whether the radio has a ramp-up faster than the one its interframe space is qualified for (`ramp(true)` is then
+    // more than a no-op).  A radio that has none answers false, and `ramp` does nothing.
+    fn has_fast_ramp(var self) -> Bool [e]
+    // The longest ramp-up on `phy` in microseconds, the transmitter's or the receiver's, from the start task to a
+    // radio that sends or listens: of the fast ramp-up when `fast` (the legacy figure when the radio has no fast
+    // one).  It does not follow `phy` or `ramp` calls: the Controller asks for all of them when it starts.  The
+    // receiver's lead is this and `RX_MARGIN_US`.  Every budget of the shared code is derived from these answers
+    // (`RadioProfile`).
+    fn ramp_us(var self, phy: Int, fast: Bool) -> Int [e]
+    // The time the program takes to move one octet of a payload between the radio's packet buffer and the buffers of the Host's
+    // SDUs, in nanoseconds, for the build and the clock it runs on (the loops that cut an SDU into payloads and put them back
+    // together).  The spacing the Controller gives the subevents of a stream it creates grows with the payload by this much
+    // (`RadioProfile`); a port reports what it measures.
+    fn octet_work_ns(var self) -> Int [e]
+
+    // Whether the radio can send and receive on `phy` (`ll_phy.PHY_1M`, `PHY_2M` or `PHY_CODED`).  A Controller on a radio that
+    // answers false for LE Coded refuses it everywhere it is named: the PHY commands, the extended scanning, advertising and
+    // initiating, the test commands, and the LE feature set it sends.
+    fn supports_phy(var self, phy: Int) -> Bool [e]
+
+    // Point the radio at an access address and CRC seed, for packets of at
+    // most `maxlen` octets of payload.  The PHY is LE 1M until `phy` says otherwise.
+    fn config(var self, aa: Int, crc_init: Int, maxlen: Int) [e]
+    // Send and receive on `phy` (`ll_phy.PHY_1M`, `PHY_2M` or `PHY_CODED`) from the next
+    // start on; `s8` says a transmitter of the LE Coded PHY sends S=8 coding, not S=2 (a
+    // receiver reads either).  The same PHY serves both directions: the interframe
+    // space is kept by the radio, which cannot change its mode inside it.  The leads,
+    // the interframe register and the bounds on the waits follow the PHY.  `config`
+    // brings the PHY back to LE 1M.
+    fn phy(var self, phy: Int, s8: Bool) [e]
+    // The ramp-up of the next `start_tx` or `start_rx`: the fast one (about 40 microseconds against 140) or the one the
+    // interframe space is qualified for.  The leads follow it.  A program that starts a packet at a time of its own, with
+    // nothing within the T_IFS of a packet before it, asks for the fast one and returns to the other before the packet it
+    // starts ends, since the turn-around after it is made by the radio.  `config` brings the ramp-up back to the second.
+    // On a radio without a fast ramp-up (`has_fast_ramp` false) the call changes nothing.
+    fn ramp(var self, fast: Bool) [e]
+    // The channel index, 0 to 39.
+    fn channel(var self, ch: Int) [e]
+    // Whiten the packets (every Link Layer packet) or not (the LE test packets of Direct
+    // Test Mode, [Vol 6] Part F, Section 4.1.1), from the next start on.  `config` turns
+    // whitening on again.
+    fn whitening(var self, on: Bool) [e]
+    // Transmit at the level nearest `dbm`, from the next start on; the answer is the level
+    // set, in dBm.  `config` sets 0 dBm again.
+    fn power(var self, dbm: Int) -> Int [e]
+    // Hold the radio's power state so that a start takes the same time every
+    // time (the nRF54's constant latency), and let go of it.
+    fn hold(var self) [e]
+    fn release(var self) [e]
+
+    // The packet buffer the radio moves the next packet to or from.
+    fn packet(var self, buf: Int) [e]
+    // Arm what the radio does by itself: when a packet ends it stops, and
+    // `next` says whether it turns round to the transmitter or the receiver, T_IFS
+    // after the end.  `rssi` samples the signal strength at the access address.
+    fn arm(var self, next: Int, rssi: Bool) [e]
+    // Nothing is armed.
+    fn disarm(var self) [e]
+    // Start the transmitter or the receiver now.
+    fn start_tx(var self) [e]
+    fn start_rx(var self) [e]
+    // Take the radio to rest at once: nothing armed, and return when it is idle.
+    fn halt(var self) [e]
+    // Wait until the radio is idle; false when it was not within a bound.
+    fn wait_disabled(var self) -> Bool [e]
+
+    // Forget the events of a packet.  `clear_all` forgets every one (the access
+    // address, the end, the CRC verdict and the radio's being idle); `clear_address`
+    // the access address only; `clear_packet` every one but the radio's being idle;
+    // `clear_done` every one but the access address.
+    fn clear_all(var self) [e]
+    fn clear_address(var self) [e]
+    fn clear_packet(var self) [e]
+    fn clear_done(var self) [e]
+    // Whether the access address of a packet has arrived.
+    fn address_seen(var self) -> Bool [e]
+    // Wait until the time `limit` (microseconds) or the access address; true
+    // when the access address came.
+    fn wait_address(var self, limit: Int) -> Bool [e]
+    // Wait for the end of the packet on air (transmitted or received); false when
+    // it did not come within a bound.
+    fn wait_phyend(var self) -> Bool [e]
+    // Wait for the end of the packet being received and its CRC verdict:
+    // `RX_TIMEOUT`, `RX_GOOD` or `RX_BAD`.
+    fn wait_rx(var self) -> Int [e]
+    // The signal strength of the packet received, in dBm.
+    fn rssi_dbm(var self) -> Int [e]
+
+    // A mark of the latest access address, to be read at once and turned into a
+    // time later (`mark_us`): the next packet's access address replaces it.
+    fn address_mark(var self) -> Int [e]
+    // The time in microseconds at which the access address, marked by
+    // `address_mark`, ended.
+    fn mark_us(var self, mark: Int) -> Int [e]
+    // The microseconds by which the time of a received packet's access address (`mark_us`) lags the air: the receiver's chain between the antenna and
+    // the event.  A packet sent at a fixed time after one received (the response slots of a subevent) is timed from the start the mark gives less this.
+    fn rx_stamp_us(var self) -> Int [e]
+    // The turn-around of the last answer, in nanoseconds: from the end of the
+    // packet the radio received to the first bit of the answer it sent by itself,
+    // less the preamble and the access address.  `NOT_MEASURED` when the backend
+    // cannot measure it.
+    fn turnaround_ns(var self) -> Int [e]
+
+    // Copy `p` into the buffer.
+    fn put(var self, buf: Int, var p: Pdu) [e]
+    // Copy the octets `from` to `to` (exclusive) of the buffer into `p`.
+    fn read(var self, buf: Int, var p: Pdu, from: Int, to: Int) [e]
+    // Copy the first `n` octets of the buffer into `p` and set its length: the
+    // fast path of a data PDU.
+    fn read_pdu(var self, buf: Int, var p: Pdu, n: Int) [e]
+    // One octet of the buffer, and its replacement.
+    fn octet(var self, buf: Int, at: Int) -> Int [e]
+    fn set_octet(var self, buf: Int, at: Int, v: Int) [e]
+
+// ── What the shared code derives from the ramp-up ────────────────────
+//
+// The Link Layer's budgets (the lead the arbiter gives a booking, the guard before a higher one, the spacing a
+// stream's subevents need, how late a subevent may start) follow from what a radio takes to ramp up and from a few
+// named amounts of the program's own work.  A port reports the first with `has_fast_ramp` and `ramp_us`; the
+// Controller reads them once (`profile_of`) and keeps the answers in a `RadioProfile`, so that code which holds no
+// radio (the arbiter, the HCI commands that plan a stream) can still decide.  Nothing below names a chip.
+
+// The receiver starts this long beyond its ramp-up, for the jitter of the start.
+pub const RX_MARGIN_US = 25
+
+// The program's own work before it can point the radio at a booking: the main loop may be partway through an HCI
+// command or an advertising PDU when a booking falls due.  The arbiter's lead is this and the legacy ramp-up with its margin.
+pub const LEAD_WORK_US = 430
+
+// The part of that work which the main loop leaves out when it moves octets of the HCI stream ahead of a booking:
+// it stops this long before the legacy ramp-up begins.
+pub const STREAM_WORK_US = 180
+
+// The extra time a connection event is granted the radio ahead of other classes.
+pub const ACL_EXTRA_US = 400
+
+// The program's work between the end of one subevent of a stream and the start of the receiver or the transmitter
+// of the next: opening the packet, the Host's side of the SDU, the bookkeeping, and the next subevent's set-up.
+// A pair of subevents needs the gap between them to hold this and the ramp-up.
+pub const SUBEVENT_WORK_US = 80
+
+// The latest, after the time it was planned, that the first bit of a subevent may be on air and still fall in the
+// window the peer listens in.  The program started later than this less the ramp-up gives the subevent up.
+pub const LATE_START_MAX_US = 195
+
+// What a Controller assumes of a radio until it is told: the legacy ramp-up of the nRF52 and nRF54 RADIO, the one
+// the Link Layer was written for, with no fast ramp-up.  `RadioProfile.known` is false then and the checks that
+// refuse a stream for want of time do not run.
+pub const RAMP_ASSUMED_US = 145
+
+// What a Controller assumes of the program's work on an octet of a payload until the radio says (`Radio.octet_work_ns`): the
+// figure of the nRF54LM20 at 128 MHz: the 0.44 to 0.72 microseconds the loops that move an octet between two buffers take, and the
+// 0.3 the cipher adds on an encrypted stream, so that the spacing it gives holds for both.
+pub const OCTET_NS_ASSUMED = 1000
+
+// What the Controller keeps of a radio's ramp-up: whether there is a fast one, and the longest ramp-up of each
+// PHY in both modes, and the program's work for each octet of a payload.  `known` is false until `profile_of` filled it.
+@value
+pub struct RadioProfile
+    known: Bool
+    fast: Bool
+    octet_ns: Int
+    slow_1m: Int
+    slow_2m: Int
+    slow_cod: Int
+    fast_1m: Int
+    fast_2m: Int
+    fast_cod: Int
+
+// The profile of a Controller whose radio has not been asked.
+@tier(embedded)
+pub fn profile_assumed() -> RadioProfile
+    RadioProfile { known: false, fast: false, octet_ns: OCTET_NS_ASSUMED, slow_1m: RAMP_ASSUMED_US, slow_2m: RAMP_ASSUMED_US, slow_cod: RAMP_ASSUMED_US,
+                   fast_1m: RAMP_ASSUMED_US, fast_2m: RAMP_ASSUMED_US, fast_cod: RAMP_ASSUMED_US }
+
+// A profile of the same ramp-up on every PHY, for a port with no PHY-dependent figure and for tests.
+@tier(embedded)
+pub fn profile_new(fast: Bool, slow_us: Int, fast_us: Int) -> RadioProfile
+    profile_for(fast, slow_us, fast_us, OCTET_NS_ASSUMED)
+
+// The same for a CPU that takes `octet_ns` nanoseconds for an octet of a payload.
+@tier(embedded)
+pub fn profile_for(fast: Bool, slow_us: Int, fast_us: Int, octet_ns: Int) -> RadioProfile
+    var f = fast_us
+    if not fast
+        f = slow_us
+    RadioProfile { known: true, fast: fast, octet_ns: octet_ns, slow_1m: slow_us, slow_2m: slow_us, slow_cod: slow_us,
+                   fast_1m: f, fast_2m: f, fast_cod: f }
+
+// Ask a radio for what the shared code derives its budgets from.
+pub fn profile_of<R: Radio[e]>(var air: R) -> RadioProfile [e]
+    let fast = air.has_fast_ramp()
+    RadioProfile { known: true, fast: fast, octet_ns: air.octet_work_ns(),
+                   slow_1m: air.ramp_us(ll_phy.PHY_1M, false), slow_2m: air.ramp_us(ll_phy.PHY_2M, false),
+                   slow_cod: air.ramp_us(ll_phy.PHY_CODED, false),
+                   fast_1m: air.ramp_us(ll_phy.PHY_1M, fast), fast_2m: air.ramp_us(ll_phy.PHY_2M, fast),
+                   fast_cod: air.ramp_us(ll_phy.PHY_CODED, fast) }
+
+// The ramp-up on `phy`, in the fast mode or the legacy one.
+@tier(embedded)
+pub fn ramp_of(p: RadioProfile, phy: Int, fast: Bool) -> Int
+    if phy == ll_phy.PHY_2M
+        if fast
+            return p.fast_2m
+        return p.slow_2m
+    if phy == ll_phy.PHY_CODED
+        if fast
+            return p.fast_cod
+        return p.slow_cod
+    if fast
+        return p.fast_1m
+    p.slow_1m
+
+// The ramp-up a start uses on `phy`: the fast one when the radio has it.
+@tier(embedded)
+pub fn ramp_best(p: RadioProfile, phy: Int) -> Int
+    ramp_of(p, phy, p.fast)
+
+// The longest legacy ramp-up of the three PHYs, and the longest of the ramp-ups a start uses.
+@tier(embedded)
+pub fn ramp_slow_worst(p: RadioProfile) -> Int
+    ll_phy.greater(p.slow_1m, ll_phy.greater(p.slow_2m, p.slow_cod))
+
+@tier(embedded)
+pub fn ramp_best_worst(p: RadioProfile) -> Int
+    ll_phy.greater(ramp_best(p, ll_phy.PHY_1M), ll_phy.greater(ramp_best(p, ll_phy.PHY_2M), ramp_best(p, ll_phy.PHY_CODED)))
+
+// The time before its start that the arbiter grants a booking the radio: the program's work and the legacy ramp-up.
+@tier(embedded)
+pub fn lead_us(p: RadioProfile) -> Int
+    LEAD_WORK_US + ramp_slow_worst(p) + RX_MARGIN_US
+
+// The time before a higher booking that a class lets go of the radio.
+@tier(embedded)
+pub fn guard_us(p: RadioProfile) -> Int
+    lead_us(p)
+
+// The time before a booking that the main loop stops moving octets of the HCI stream.
+@tier(embedded)
+pub fn stream_guard_us(p: RadioProfile) -> Int
+    STREAM_WORK_US + ramp_slow_worst(p) + RX_MARGIN_US
+
+// The gap, from the end of one subevent to the start of the next on the radio, that a stream on `phy` needs:
+// the ramp-up the start uses, its margin and the program's work in between.
+@tier(embedded)
+pub fn subevent_gap_us(p: RadioProfile, phy: Int) -> Int
+    ramp_best(p, phy) + RX_MARGIN_US + SUBEVENT_WORK_US
+
+// The time the program's work on `octets` octets of payload takes (the octets of both directions that pass between two
+// subevents), in microseconds, rounded up.
+@tier(embedded)
+pub fn octets_us(p: RadioProfile, octets: Int) -> Int
+    (octets * p.octet_ns + 999) / 1000
+
+// The spacing a Central adds to the subevents of a stream whose payloads are `octets` long between them, beyond the T_MSS_CIS of
+// the specification: the time of the program's work on the octets.  A Controller whose radio was not asked adds none.
+@satisfies("REQ-BLE-CTL-077")
+@tier(embedded)
+pub fn payload_gap_us(p: RadioProfile, octets: Int) -> Int
+    if not p.known
+        return 0
+    octets_us(p, octets)
+
+// How late after its planned time a subevent may be started and still be run: the first bit falls the ramp-up
+// after the start, and `LATE_START_MAX_US` after the plan is the latest the peer is listening.
+@tier(embedded)
+pub fn late_tol_us(p: RadioProfile) -> Int
+    let t = LATE_START_MAX_US - ramp_best_worst(p)
+    if t < 0
+        return 0
+    t
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+pub fn fast_profile() -> RadioProfile
+    profile_new(true, 145, 45)
+
+pub fn slow_profile() -> RadioProfile
+    profile_new(false, 145, 0)
+
+@test
+fn test_profile_the_budgets_of_a_radio_with_a_fast_ramp_up()
+    var p = fast_profile()
+    test.assert_eq(lead_us(p), 600)
+    test.assert_eq(guard_us(p), 600)
+    test.assert_eq(stream_guard_us(p), 350)
+    test.assert_eq(subevent_gap_us(p, ll_phy.PHY_2M), 150)
+    test.assert_eq(late_tol_us(p), 150)
+
+@test
+fn test_profile_a_radio_with_no_fast_ramp_up_needs_a_longer_gap_and_tolerates_less_lateness()
+    var p = slow_profile()
+    test.assert_eq(lead_us(p), 600)
+    test.assert_eq(subevent_gap_us(p, ll_phy.PHY_1M), 250)
+    test.assert_eq(late_tol_us(p), 50)
+    test.assert_eq(ramp_best(p, ll_phy.PHY_CODED), 145)
+
+@test
+fn test_profile_a_slower_ramp_up_lengthens_the_leads_and_never_gives_a_negative_tolerance()
+    var p = profile_new(false, 400, 0)
+    test.assert_eq(lead_us(p), 855)
+    test.assert_eq(late_tol_us(p), 0)
+
+@test
+fn test_profile_a_controller_that_has_not_been_told_assumes_the_legacy_ramp_up()
+    var p = profile_assumed()
+    test.assert(not p.known)
+    test.assert_eq(lead_us(p), 600)
+
+@test
+fn test_profile_the_payload_gap_follows_the_octets_and_the_cpu_the_radio_reports()
+    let p = fast_profile()
+    test.assert_eq(p.octet_ns, OCTET_NS_ASSUMED)
+    // 251 octets each way at 1 microsecond an octet.
+    test.assert_eq(payload_gap_us(p, 502), 502)
+    test.assert_eq(payload_gap_us(p, 0), 0)
+    // A slower CPU, or a faster one, moves the figure and nothing else of the profile.
+    let slow_cpu = profile_for(true, 145, 45, 2000)
+    test.assert_eq(payload_gap_us(slow_cpu, 502), 1004)
+    test.assert_eq(subevent_gap_us(slow_cpu, ll_phy.PHY_2M), 150)
+    // A Controller that was not told adds no spacing.
+    test.assert_eq(payload_gap_us(profile_assumed(), 502), 0)

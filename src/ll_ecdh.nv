@@ -1,0 +1,50 @@
+// src/controller/ll_ecdh.nv — the seam between the Controller and the P-256 of the chip.
+//
+// LE Read Local P-256 Public Key and LE Generate DHKey ([Vol 4] Part E, Sections 7.8.36 and
+// 7.8.37) ask the Controller for the public key of a private key it keeps and for the
+// shared secret of that key and a peer's public key.  A chip with a public key engine
+// (the CRACEN PKE of the nRF54L) answers with it; one without answers in software
+// (`ll_p256.nv`, over crypto-ble-ecc).  The Controller asks an `Ecdh` for two things and does
+// not know who answers, as it does not for the block cipher (`ll_cipher.nv`).
+//
+// Keys cross the interface in the order the HCI carries them: X then Y, 32 octets each, the
+// least significant octet first; the private key and the DHKey the same.
+//
+// An engine can fail without the key being wrong (the nRF54 PKE that does not finish).  Both
+// calls answer false then and `faults` counts it, so that the Controller ends the command
+// with Hardware Failure and not with the status for a key the Host sent.
+
+pub trait Ecdh[e]
+    // The public key (X, Y) of `secret`, in `out`.  False when `secret` is no private key
+    // (zero, or not below the order of the curve), so that the caller draws another.
+    fn public_key(var self, var secret: Vec[u8; 32], var out: Vec[u8; 64]) -> Bool [e]
+    // The DHKey of `secret` and the public key `peer`, in `out`.  False when `peer` is no
+    // point of the curve ([Vol 3] Part H, Section 2.3.5.6.1).
+    fn dhkey(var self, var secret: Vec[u8; 32], var peer: Vec[u8; 64], var out: Vec[u8; 32]) -> Bool [e]
+    // How many operations the engine failed to finish since the backend began.
+    fn faults(var self) -> Int [e]
+
+// The word `i` of the private key of the Security Manager's Debug mode ([Vol 3] Part H,
+// Section 2.3.5.6.1), which LE Generate DHKey [v2] uses for a Key_Type of 1.  The specification
+// prints the key as eight words, the most significant first; word 0 here is the first printed.
+@tier(embedded)
+pub fn debug_key_word(i: Int) -> Int
+    match i
+        0 => 0x3F49F6D4
+        1 => 0xA3C55F38
+        2 => 0x74C9B3E3
+        3 => 0xD2103F50
+        4 => 0x4AFF607B
+        5 => 0xEB40B799
+        6 => 0x5899B8A6
+        _ => 0xCD3C1ABD
+
+// That key in the order the HCI carries a key: 32 octets, the least significant first.
+@tier(embedded)
+pub fn debug_private_key() -> Vec[u8; 32]
+    var k: Vec[u8; 32] = Vec.new()
+    for i in 0..32
+        // Octet `i` from the least significant end is octet `31 - i` of the printed key.
+        let word = debug_key_word((31 - i) / 4)
+        let _p = k.push(((word >>> (8 * (3 - (31 - i) % 4))) & 0xFF) as u8)
+    k

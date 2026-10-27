@@ -1,0 +1,73 @@
+// src/controller/ll_cipher.nv — the seam between the Link Layer and the
+// hardware that encrypts: what the Link Layer asks of a block cipher and of
+// AES-CCM, and the keys it asks with.
+//
+// Not every chip has an AES engine.  A Cortex-M core has none; the SoC may
+// (the nRF CCM and ECB peripherals, the STM32 AES block, others have nothing).
+// The Link Layer therefore asks a `Cipher` for three things and does not know
+// who answers:
+//
+//   seal    encrypt a Data Physical Channel PDU in place and append its 4-octet
+//           MIC ([Vol 6] Part E, Section 2)
+//   open    check the MIC of a received PDU and decrypt it in place
+//   block   one AES-128 block (LE Encrypt, the session key derivation)
+//
+// There are two backends.  `SoftCipher` (`ll_ccm.nv`) is pure Novo, runs in the
+// simulation and is the answer on a chip without an AES engine; the CCM00 and
+// ECB00 peripherals of the nRF54L (`nrf54/ccm_nrf54.nv`) are the other.  The
+// software backend is also the reference the hardware one is checked against.
+//
+// No function here allocates.
+
+use ll_pdu
+
+// The session key and the initialisation vector of an encrypted connection
+// ([Vol 6] Part B, Section 5.1.3.1).  `sk` is the session key least significant
+// octet first, the order the HCI carries the long term key in; `iv` is the 8
+// octets IV_C then IV_P, as the nonce takes them (octets 5 to 12 of Table 2.1).
+@value
+pub struct EncKey
+    sk: Vec[u8; 16]
+    iv: Vec[u8; 8]
+
+@no_alloc
+@tier(embedded)
+pub fn enc_key_new() -> EncKey
+    var k = EncKey { sk: Vec.new(), iv: Vec.new() }
+    for _ in 0..16
+        let _a = k.sk.push(0)
+    for _ in 0..8
+        let _b = k.iv.push(0)
+    k
+
+// The directionBit of a PDU sent by the Central, and by the Peripheral.
+pub const DIR_CENTRAL = 1
+pub const DIR_PERIPHERAL = 0
+
+// Bit 1 of the `dir` argument of `seal` and `open` says the PDU is a Connected Isochronous PDU: the additional
+// data of its header octet masks NESN, SN, CIE and NPI ([Vol 6] Part E, Section 2.2), 0xA3, where a data
+// channel PDU's masks NESN, SN and MD, 0xE3.  Bit 0 is the directionBit.
+pub const DIR_CIS = 2
+
+// Bit 2 says the PDU is a Broadcast Isochronous PDU (a BIS Data PDU or a BIG Control PDU): the additional data of its header octet
+// masks the Control Subevent Sequence Number and Transmission Flag (bits 2 to 5), 0xC3 ([Vol 6] Part E, Section 2.2).  The directionBit
+// of such a PDU is 1, the Isochronous Broadcaster's.
+pub const DIR_BIS = 4
+
+// The octets of the MIC.
+pub const MIC_OCTETS = 4
+
+pub trait Cipher[e]
+    // Encrypt the payload of `p` in place with the nonce of `ctr` and `dir` and
+    // append the MIC; the length octet grows by 4.  An empty PDU is left as it is.
+    fn seal(var self, var ek: EncKey, ctr: Int, dir: Int, var p: Pdu) [e]
+    // Decrypt `p` in place; false when its MIC does not match.  An empty PDU is
+    // left as it is and passes; a payload shorter than a MIC does not.
+    fn open(var self, var ek: EncKey, ctr: Int, dir: Int, var p: Pdu) -> Bool [e]
+    // Encrypt the 16 octets of `blk` in place with the 16 octets of `key`, both
+    // most significant octet first.  False when the engine failed.
+    fn block(var self, var key: Vec[u8; 16], var blk: Vec[u8; 16]) -> Bool [e]
+    // How many operations the engine failed to finish since the backend began.  A
+    // `seal` that failed leaves an empty PDU, so that nothing clear is sent, and the
+    // program ends the connection when this number grew.
+    fn faults(var self) -> Int [e]

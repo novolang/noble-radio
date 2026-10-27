@@ -1,0 +1,11 @@
+[package]
+name        = "noble-radio"
+version     = "0.1.0"
+description = "The traits between the noble Link Layer and a chip (Radio, Timebase, Cipher, Ecdh) with the PDU and PHY types they name; no register, no chip."
+category    = "networking"
+layer       = "core"
+
+# The embedded tier of orbit/ble, whose Controller depends on this package.
+[tier]
+tier   = "embedded"
+target = "nrf52832-dk"
