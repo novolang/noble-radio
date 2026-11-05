@@ -1,0 +1,187 @@
+// tests/ll_ecdh_tests.nv — the unit tests of src/ll_ecdh.nv: the private key of the Security Manager's Debug mode, and
+// the contract of `Ecdh` as a small implementation of it keeps it.
+//
+// `ToyEcdh` is not a curve: its public key is the private key twice over and its DHKey is the exclusive or of the
+// private key and the first half of the peer's public key.  It has the properties the Controller relies on: two parties
+// reach the same DHKey, a zero private key and a zero peer key are refused, and a refusal is counted in `faults`.
+// `agree` is a generic function over `E: Ecdh[e]`, as the Controller's code is.
+//
+//   novo test tests/ll_ecdh_tests.nv
+
+use std.test
+use ll_ecdh
+
+// ── An engine that is not one ────────────────────────────────────────
+
+struct ToyEcdh
+    var failed: Int
+
+fn toy_ecdh() -> ToyEcdh
+    ToyEcdh { failed: 0 }
+
+fn is_zero32(var v: Vec[u8; 32]) -> Bool
+    for i in 0..32
+        if v[i] != 0
+            return false
+    true
+
+fn is_zero64(var v: Vec[u8; 64]) -> Bool
+    for i in 0..64
+        if v[i] != 0
+            return false
+    true
+
+impl Ecdh[] for ToyEcdh
+    fn public_key(var self, var secret: Vec[u8; 32], var out: Vec[u8; 64]) -> Bool
+        if is_zero32(var secret)
+            self.failed = self.failed + 1
+            return false
+        for k in 0..32
+            out[k] = secret[k]
+            out[32 + k] = secret[k]
+        true
+
+    fn dhkey(var self, var secret: Vec[u8; 32], var peer: Vec[u8; 64], var out: Vec[u8; 32]) -> Bool
+        if is_zero64(var peer)
+            self.failed = self.failed + 1
+            return false
+        for k in 0..32
+            out[k] = secret[k] ^ peer[k]
+        true
+
+    fn faults(var self) -> Int
+        self.failed
+
+fn secret_of(first: Int) -> Vec[u8; 32]
+    var v: Vec[u8; 32] = Vec.new()
+    for k in 0..32
+        let _p = v.push((first + k) as u8)
+    v
+
+fn blank32() -> Vec[u8; 32]
+    var v: Vec[u8; 32] = Vec.new()
+    for _ in 0..32
+        let _p = v.push(0)
+    v
+
+fn blank64() -> Vec[u8; 64]
+    var v: Vec[u8; 64] = Vec.new()
+    for _ in 0..64
+        let _p = v.push(0)
+    v
+
+// What two controllers do: each makes its public key, they swap, each makes the DHKey.  True when both reach the same.
+fn agree<E: Ecdh[e]>(var x: E, var a: Vec[u8; 32], var b: Vec[u8; 32]) -> Bool [e]
+    var pub_a = blank64()
+    var pub_b = blank64()
+    if not x.public_key(var a, var pub_a)
+        return false
+    if not x.public_key(var b, var pub_b)
+        return false
+    var dh_a = blank32()
+    var dh_b = blank32()
+    if not x.dhkey(var a, var pub_b, var dh_a)
+        return false
+    if not x.dhkey(var b, var pub_a, var dh_b)
+        return false
+    for k in 0..32
+        if dh_a[k] != dh_b[k]
+            return false
+    true
+
+// ── The Debug mode key ───────────────────────────────────────────────
+
+@test
+fn test_the_debug_key_is_eight_words_as_the_specification_prints_them()
+    test.assert_eq(ll_ecdh.debug_key_word(0), 0x3F49F6D4)
+    test.assert_eq(ll_ecdh.debug_key_word(1), 0xA3C55F38)
+    test.assert_eq(ll_ecdh.debug_key_word(2), 0x74C9B3E3)
+    test.assert_eq(ll_ecdh.debug_key_word(3), 0xD2103F50)
+    test.assert_eq(ll_ecdh.debug_key_word(4), 0x4AFF607B)
+    test.assert_eq(ll_ecdh.debug_key_word(5), 0xEB40B799)
+    test.assert_eq(ll_ecdh.debug_key_word(6), 0x5899B8A6)
+    test.assert_eq(ll_ecdh.debug_key_word(7), 0xCD3C1ABD)
+
+@test
+fn test_a_word_number_past_the_last_reads_as_the_last()
+    test.assert_eq(ll_ecdh.debug_key_word(8), ll_ecdh.debug_key_word(7))
+    test.assert_eq(ll_ecdh.debug_key_word(100), ll_ecdh.debug_key_word(7))
+
+@test
+fn test_the_debug_key_in_hci_order_is_32_octets_least_significant_first()
+    var k = ll_ecdh.debug_private_key()
+    test.assert_eq(k.len(), 32)
+    test.assert_eq(k.capacity(), 32)
+    // The printed key ends in ...CD3C1ABD, so its least significant octet is BD and the next is 1A.
+    test.assert_eq(k[0] as Int, 0xBD)
+    test.assert_eq(k[1] as Int, 0x1A)
+    test.assert_eq(k[2] as Int, 0x3C)
+    test.assert_eq(k[3] as Int, 0xCD)
+    // And it starts 3F49F6D4, which ends the HCI form.
+    test.assert_eq(k[28] as Int, 0xD4)
+    test.assert_eq(k[29] as Int, 0xF6)
+    test.assert_eq(k[30] as Int, 0x49)
+    test.assert_eq(k[31] as Int, 0x3F)
+
+@test
+fn test_every_word_of_the_debug_key_sits_in_its_four_octets()
+    var k = ll_ecdh.debug_private_key()
+    for w in 0..8
+        let word = ll_ecdh.debug_key_word(w)
+        let base = 4 * (7 - w)
+        test.assert_eq(k[base] as Int, word & 0xFF)
+        test.assert_eq(k[base + 1] as Int, (word >>> 8) & 0xFF)
+        test.assert_eq(k[base + 2] as Int, (word >>> 16) & 0xFF)
+        test.assert_eq(k[base + 3] as Int, (word >>> 24) & 0xFF)
+
+// ── The contract of Ecdh ─────────────────────────────────────────────
+
+@test
+fn test_two_parties_reach_the_same_dhkey()
+    var e = toy_ecdh()
+    var a = secret_of(1)
+    var b = secret_of(0x40)
+    test.assert(agree(var e, var a, var b))
+    test.assert_eq(e.faults(), 0)
+
+@test
+fn test_the_dhkey_of_the_debug_key_agrees_with_another_key()
+    var e = toy_ecdh()
+    var d = ll_ecdh.debug_private_key()
+    var b = secret_of(0x10)
+    test.assert(agree(var e, var d, var b))
+
+@test
+fn test_a_zero_private_key_is_refused_and_counted()
+    var e = toy_ecdh()
+    var zero = blank32()
+    var out = blank64()
+    test.assert(not e.public_key(var zero, var out))
+    test.assert_eq(e.faults(), 1)
+    var a = secret_of(1)
+    test.assert(not agree(var e, var zero, var a))
+    test.assert_eq(e.faults(), 2)
+
+@test
+fn test_a_peer_key_that_is_no_point_is_refused_and_counted()
+    var e = toy_ecdh()
+    var a = secret_of(1)
+    var peer = blank64()
+    var out = blank32()
+    test.assert(not e.dhkey(var a, var peer, var out))
+    test.assert_eq(e.faults(), 1)
+    peer[3] = 1
+    test.assert(e.dhkey(var a, var peer, var out))
+    test.assert_eq(e.faults(), 1)
+    test.assert_eq(out[3] as Int, 4 ^ 1)
+
+@test
+fn test_the_public_key_is_x_then_y_of_32_octets_each()
+    var e = toy_ecdh()
+    var a = secret_of(5)
+    var out = blank64()
+    test.assert(e.public_key(var a, var out))
+    test.assert_eq(out[0] as Int, 5)
+    test.assert_eq(out[31] as Int, 36)
+    test.assert_eq(out[32] as Int, 5)
+    test.assert_eq(out[63] as Int, 36)

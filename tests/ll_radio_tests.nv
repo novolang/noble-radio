@@ -1,0 +1,715 @@
+// tests/ll_radio_tests.nv — the unit tests of src/ll_radio.nv: the constants of LE 1M, the budgets derived from a
+// `RadioProfile`, and the contract of `Radio` and `Timebase` as a small implementation of both keeps it.
+//
+// `FakeAir` is a transceiver with no registers.  It follows the contract the traits state: `config` brings the PHY,
+// the ramp-up, the whitening and the power back to their defaults; `start_tx` and `start_rx` take the lead time the
+// radio reports; `wait_rx` answers `RX_TIMEOUT` unless a receiver was started.  `exchange` is a generic function in
+// the shape of the Link Layer's radio program: it is written over `R: Radio[e] + Timebase[e1]` and sees only the traits.
+//
+//   novo test tests/ll_radio_tests.nv
+
+use std.test
+use ll_radio
+use ll_phy
+use ll_pdu
+
+// ── A radio and a clock with no chip ─────────────────────────────────
+
+struct FakeAir
+    var now: Int
+    var bufs: [Int]
+    var ptr: Int
+    var fast_ok: Bool
+    var fast_on: Bool
+    var coded_ok: Bool
+    var aa: Int
+    var crc: Int
+    var maxlen: Int
+    var phy: Int
+    var s8: Bool
+    var ch: Int
+    var white: Bool
+    var pwr: Int
+    var held: Int
+    var next: Int
+    var state: Int
+    var addr_ev: Bool
+    var end_ev: Bool
+    var bad_crc: Bool
+    var addr_at: Int
+    var last_end: Int
+    var cycle: Int
+    var no_address: Bool
+    var no_end: Bool
+
+// A radio at rest, 1M, whitening on.
+fn fake_air(fast_ok: Bool, coded_ok: Bool) -> FakeAir
+    var b: [Int] = []
+    for _ in 0..5 * 260
+        list.push(b, 0)
+    FakeAir { now: 1000, bufs: b, ptr: 0, fast_ok: fast_ok, fast_on: false, coded_ok: coded_ok, aa: 0, crc: 0, maxlen: 0,
+              phy: ll_phy.PHY_1M, s8: false, ch: 0, white: true, pwr: 0, held: 0, next: ll_radio.THEN_REST, state: 0,
+              addr_ev: false, end_ev: false, bad_crc: false, addr_at: 0, last_end: 0, cycle: 0, no_address: false, no_end: false }
+
+// The states of the radio: at rest, started as a transmitter, started as a receiver.
+const REST = 0
+const TXING = 1
+const RXING = 2
+
+// The ramp-up of the fake, in microseconds.
+fn fake_ramp(phy: Int, fast: Bool) -> Int
+    if fast
+        return 40
+    if phy == ll_phy.PHY_2M
+        return 140
+    if phy == ll_phy.PHY_CODED
+        return 150
+    145
+
+fn fake_lead(var a: FakeAir) -> Int
+    fake_ramp(a.phy, a.fast_on)
+
+impl Timebase[] for FakeAir
+    fn now_us(var self) -> Int
+        self.now
+
+    fn stamp(var self) -> Int
+        (self.now * 16) & 0xFFFFFFFF
+
+    fn stamps_per_us(var self) -> Int
+        16
+
+    fn cycles(var self) -> Int
+        self.cycle
+
+    fn wait_until(var self, t: Int)
+        if self.now < t
+            self.now = t
+
+impl Radio[] for FakeAir
+    fn tx_lead_us(var self) -> Int
+        fake_lead(var self)
+
+    fn rx_lead_us(var self) -> Int
+        fake_lead(var self) + ll_radio.RX_MARGIN_US
+
+    fn has_fast_ramp(var self) -> Bool
+        self.fast_ok
+
+    fn ramp_us(var self, phy: Int, fast: Bool) -> Int
+        fake_ramp(phy, fast and self.fast_ok)
+
+    fn octet_work_ns(var self) -> Int
+        700
+
+    fn supports_phy(var self, phy: Int) -> Bool
+        phy != ll_phy.PHY_CODED or self.coded_ok
+
+    fn config(var self, aa: Int, crc_init: Int, maxlen: Int)
+        self.aa = aa
+        self.crc = crc_init
+        self.maxlen = maxlen
+        self.phy = ll_phy.PHY_1M
+        self.fast_on = false
+        self.white = true
+        self.pwr = 0
+
+    fn phy(var self, phy: Int, s8: Bool)
+        self.phy = phy
+        self.s8 = s8
+
+    fn ramp(var self, fast: Bool)
+        self.fast_on = fast and self.fast_ok
+
+    fn channel(var self, ch: Int)
+        self.ch = ch
+
+    fn whitening(var self, on: Bool)
+        self.white = on
+
+    fn power(var self, dbm: Int) -> Int
+        var level = dbm
+        if level > 8
+            level = 8
+        if level < -40
+            level = -40
+        self.pwr = level
+        level
+
+    fn hold(var self)
+        self.held = self.held + 1
+
+    fn release(var self)
+        self.held = self.held - 1
+
+    fn packet(var self, buf: Int)
+        self.ptr = buf
+
+    fn arm(var self, next: Int, rssi: Bool)
+        self.next = next
+
+    fn disarm(var self)
+        self.next = ll_radio.THEN_REST
+
+    fn start_tx(var self)
+        self.state = TXING
+        self.addr_at = self.now + fake_lead(var self) + ll_phy.aa_end_us(self.phy)
+        self.addr_ev = not self.no_address
+
+    fn start_rx(var self)
+        self.state = RXING
+        self.addr_at = self.now + fake_lead(var self) + ll_phy.aa_end_us(self.phy)
+        self.addr_ev = true
+
+    fn halt(var self)
+        self.state = REST
+        self.next = ll_radio.THEN_REST
+
+    fn wait_disabled(var self) -> Bool
+        self.state == REST
+
+    fn clear_all(var self)
+        self.addr_ev = false
+        self.end_ev = false
+
+    fn clear_address(var self)
+        self.addr_ev = false
+
+    fn clear_packet(var self)
+        self.addr_ev = false
+        self.end_ev = false
+
+    fn clear_done(var self)
+        self.end_ev = false
+
+    fn address_seen(var self) -> Bool
+        self.addr_ev
+
+    fn wait_address(var self, limit: Int) -> Bool
+        if not self.addr_ev or self.addr_at > limit
+            if self.now < limit
+                self.now = limit
+            return false
+        self.now = self.addr_at
+        true
+
+    fn wait_phyend(var self) -> Bool
+        if self.state == REST or self.no_end
+            return false
+        self.now = self.now + 100
+        self.last_end = self.now
+        self.end_ev = true
+        true
+
+    fn wait_rx(var self) -> Int
+        if self.state != RXING
+            return ll_radio.RX_TIMEOUT
+        self.now = self.now + 100
+        self.last_end = self.now
+        self.end_ev = true
+        if self.bad_crc
+            return ll_radio.RX_BAD
+        ll_radio.RX_GOOD
+
+    fn rssi_dbm(var self) -> Int
+        -60
+
+    fn address_mark(var self) -> Int
+        self.addr_at
+
+    fn mark_us(var self, mark: Int) -> Int
+        mark
+
+    fn rx_stamp_us(var self) -> Int
+        3
+
+    fn turnaround_ns(var self) -> Int
+        if self.next == ll_radio.THEN_REST
+            return ll_radio.NOT_MEASURED
+        (ll_radio.T_IFS_US - 1) * 1000
+
+    fn put(var self, buf: Int, var p: Pdu)
+        for i in 0..p.n
+            self.bufs[buf * 260 + i] = p.b[i] as Int
+
+    fn read(var self, buf: Int, var p: Pdu, from: Int, to: Int)
+        for i in from..to
+            p.b[i] = self.bufs[buf * 260 + i] as u8
+
+    fn read_pdu(var self, buf: Int, var p: Pdu, n: Int)
+        for i in 0..n
+            p.b[i] = self.bufs[buf * 260 + i] as u8
+        p.n = n
+
+    fn octet(var self, buf: Int, at: Int) -> Int
+        self.bufs[buf * 260 + at]
+
+    fn set_octet(var self, buf: Int, at: Int, v: Int)
+        self.bufs[buf * 260 + at] = v & 0xFF
+
+// ── What the program does with the traits ────────────────────────────
+
+// An advertising event: point the radio at the advertising channel, send `adv`, turn to the receiver T_IFS after the
+// end, take the request that comes back into `rx` and answer with the verdict of the CRC.
+fn exchange<R: Radio[e] + Timebase[e1]>(var air: R, var adv: Pdu, var rx: Pdu) -> Int [e, e1]
+    air.config(ll_radio.ADV_ACCESS_ADDRESS, ll_radio.ADV_CRC_INIT, ll_radio.ADV_MAXLEN)
+    air.channel(37)
+    air.put(ll_radio.BUF_TX, var adv)
+    air.packet(ll_radio.BUF_TX)
+    air.clear_all()
+    air.arm(ll_radio.THEN_RX, true)
+    air.start_tx()
+    let seen = air.wait_address(air.now_us() + 1000)
+    if not seen
+        air.halt()
+        return -1
+    if not air.wait_phyend()
+        air.halt()
+        return -2
+    air.packet(ll_radio.BUF_RX)
+    air.clear_packet()
+    air.start_rx()
+    let verdict = air.wait_rx()
+    if verdict == ll_radio.RX_GOOD
+        air.read_pdu(ll_radio.BUF_RX, var rx, 14)
+    air.disarm()
+    air.halt()
+    let _idle = air.wait_disabled()
+    verdict
+
+// ── The constants ────────────────────────────────────────────────────
+
+@test
+fn test_the_constants_of_le_1m_are_the_specification_values()
+    test.assert_eq(ll_radio.AA_END_US, ll_phy.aa_end_us(ll_phy.PHY_1M))
+    test.assert_eq(ll_radio.T_IFS_US, 150)
+    test.assert_eq(ll_radio.ADV_ACCESS_ADDRESS, 0x8E89BED6)
+    test.assert_eq(ll_radio.ADV_CRC_INIT, 0x555555)
+    test.assert_eq(ll_radio.ADV_MAXLEN, ll_pdu.PAYLOAD_MAX)
+    test.assert_eq(ll_radio.EXT_PRIMARY_MAXLEN, 63)
+    test.assert_eq(ll_radio.DATA_MAXLEN, ll_phy.PAYLOAD_MAX + ll_phy.MIC_OCTETS)
+
+@test
+fn test_the_five_buffers_are_numbered_from_zero_and_fit_the_buffer_of_a_pdu()
+    test.assert_eq(ll_radio.BUF_TX, 0)
+    test.assert_eq(ll_radio.BUF_RX, 1)
+    test.assert_eq(ll_radio.BUF_ANS, 2)
+    test.assert_eq(ll_radio.BUF_CUR, 3)
+    test.assert_eq(ll_radio.BUF_NXT, 4)
+    test.assert(ll_radio.DATA_MAXLEN + 2 <= ll_pdu.PDU_CAP)
+
+@test
+fn test_the_chains_and_the_verdicts_are_distinct_values()
+    test.assert_eq(ll_radio.THEN_REST, 0)
+    test.assert_eq(ll_radio.THEN_TX, 1)
+    test.assert_eq(ll_radio.THEN_RX, 2)
+    test.assert_eq(ll_radio.RX_TIMEOUT, 0)
+    test.assert_eq(ll_radio.RX_GOOD, 1)
+    test.assert_eq(ll_radio.RX_BAD, 2)
+    test.assert(ll_radio.NOT_MEASURED < 0)
+
+// ── The profile ──────────────────────────────────────────────────────
+
+fn fast_profile() -> ll_radio.RadioProfile
+    ll_radio.profile_new(true, 145, 45)
+
+fn slow_profile() -> ll_radio.RadioProfile
+    ll_radio.profile_new(false, 145, 0)
+
+@test
+fn test_profile_the_budgets_of_a_radio_with_a_fast_ramp_up()
+    var p = fast_profile()
+    test.assert_eq(ll_radio.lead_us(p), 600)
+    test.assert_eq(ll_radio.guard_us(p), 600)
+    test.assert_eq(ll_radio.stream_guard_us(p), 350)
+    test.assert_eq(ll_radio.subevent_gap_us(p, ll_phy.PHY_2M), 150)
+    test.assert_eq(ll_radio.late_tol_us(p), 150)
+
+@test
+fn test_profile_a_radio_with_no_fast_ramp_up_needs_a_longer_gap_and_tolerates_less_lateness()
+    var p = slow_profile()
+    test.assert_eq(ll_radio.lead_us(p), 600)
+    test.assert_eq(ll_radio.subevent_gap_us(p, ll_phy.PHY_1M), 250)
+    test.assert_eq(ll_radio.late_tol_us(p), 50)
+    test.assert_eq(ll_radio.ramp_best(p, ll_phy.PHY_CODED), 145)
+
+@test
+fn test_profile_a_slower_ramp_up_lengthens_the_leads_and_never_gives_a_negative_tolerance()
+    var p = ll_radio.profile_new(false, 400, 0)
+    test.assert_eq(ll_radio.lead_us(p), 855)
+    test.assert_eq(ll_radio.late_tol_us(p), 0)
+
+@test
+fn test_profile_a_controller_that_has_not_been_told_assumes_the_legacy_ramp_up()
+    var p = ll_radio.profile_assumed()
+    test.assert(not p.known)
+    test.assert(not p.fast)
+    test.assert_eq(p.octet_ns, ll_radio.OCTET_NS_ASSUMED)
+    test.assert_eq(p.slow_1m, ll_radio.RAMP_ASSUMED_US)
+    test.assert_eq(p.fast_cod, ll_radio.RAMP_ASSUMED_US)
+    test.assert_eq(ll_radio.lead_us(p), 600)
+
+@test
+fn test_profile_the_payload_gap_follows_the_octets_and_the_cpu_the_radio_reports()
+    let p = fast_profile()
+    test.assert_eq(p.octet_ns, ll_radio.OCTET_NS_ASSUMED)
+    // 251 octets each way at 1 microsecond an octet.
+    test.assert_eq(ll_radio.payload_gap_us(p, 502), 502)
+    test.assert_eq(ll_radio.payload_gap_us(p, 0), 0)
+    // A slower CPU, or a faster one, moves the figure and nothing else of the profile.
+    let slow_cpu = ll_radio.profile_for(true, 145, 45, 2000)
+    test.assert_eq(ll_radio.payload_gap_us(slow_cpu, 502), 1004)
+    test.assert_eq(ll_radio.subevent_gap_us(slow_cpu, ll_phy.PHY_2M), 150)
+    // A Controller that was not told adds no spacing.
+    test.assert_eq(ll_radio.payload_gap_us(ll_radio.profile_assumed(), 502), 0)
+
+@test
+fn test_profile_octets_are_rounded_up_to_a_whole_microsecond()
+    let p = ll_radio.profile_for(false, 145, 0, 700)
+    test.assert_eq(ll_radio.octets_us(p, 0), 0)
+    test.assert_eq(ll_radio.octets_us(p, 1), 1)
+    test.assert_eq(ll_radio.octets_us(p, 10), 7)
+    test.assert_eq(ll_radio.octets_us(p, 11), 8)
+
+@test
+fn test_profile_for_without_a_fast_ramp_up_repeats_the_legacy_figure_as_the_fast_one()
+    let p = ll_radio.profile_for(false, 145, 40, 1000)
+    test.assert(p.known)
+    test.assert(not p.fast)
+    test.assert_eq(p.fast_1m, 145)
+    test.assert_eq(p.fast_2m, 145)
+    test.assert_eq(p.fast_cod, 145)
+    let q = ll_radio.profile_for(true, 145, 40, 1000)
+    test.assert_eq(q.fast_1m, 40)
+    test.assert_eq(q.fast_2m, 40)
+    test.assert_eq(q.fast_cod, 40)
+    test.assert_eq(q.slow_cod, 145)
+
+@test
+fn test_ramp_of_answers_the_figure_of_the_phy_and_the_mode()
+    let p = ll_radio.RadioProfile { known: true, fast: true, octet_ns: 1000, slow_1m: 11, slow_2m: 12, slow_cod: 13,
+                                    fast_1m: 21, fast_2m: 22, fast_cod: 23 }
+    test.assert_eq(ll_radio.ramp_of(p, ll_phy.PHY_1M, false), 11)
+    test.assert_eq(ll_radio.ramp_of(p, ll_phy.PHY_2M, false), 12)
+    test.assert_eq(ll_radio.ramp_of(p, ll_phy.PHY_CODED, false), 13)
+    test.assert_eq(ll_radio.ramp_of(p, ll_phy.PHY_1M, true), 21)
+    test.assert_eq(ll_radio.ramp_of(p, ll_phy.PHY_2M, true), 22)
+    test.assert_eq(ll_radio.ramp_of(p, ll_phy.PHY_CODED, true), 23)
+    // A number that is no PHY reads as LE 1M.
+    test.assert_eq(ll_radio.ramp_of(p, 0, false), 11)
+    test.assert_eq(ll_radio.ramp_of(p, 9, true), 21)
+    // A start uses the fast figure when the radio has it, the legacy one otherwise.
+    test.assert_eq(ll_radio.ramp_best(p, ll_phy.PHY_2M), 22)
+    let legacy = ll_radio.RadioProfile { known: true, fast: false, octet_ns: 1000, slow_1m: 11, slow_2m: 12, slow_cod: 13,
+                                         fast_1m: 21, fast_2m: 22, fast_cod: 23 }
+    test.assert_eq(ll_radio.ramp_best(legacy, ll_phy.PHY_2M), 12)
+
+@test
+fn test_the_worst_ramp_ups_are_the_longest_of_the_three_phys()
+    let p = ll_radio.RadioProfile { known: true, fast: true, octet_ns: 1000, slow_1m: 145, slow_2m: 140, slow_cod: 160,
+                                    fast_1m: 45, fast_2m: 41, fast_cod: 90 }
+    test.assert_eq(ll_radio.ramp_slow_worst(p), 160)
+    test.assert_eq(ll_radio.ramp_best_worst(p), 90)
+    test.assert_eq(ll_radio.lead_us(p), ll_radio.LEAD_WORK_US + 160 + ll_radio.RX_MARGIN_US)
+    test.assert_eq(ll_radio.guard_us(p), ll_radio.lead_us(p))
+    test.assert_eq(ll_radio.stream_guard_us(p), ll_radio.STREAM_WORK_US + 160 + ll_radio.RX_MARGIN_US)
+    test.assert_eq(ll_radio.late_tol_us(p), ll_radio.LATE_START_MAX_US - 90)
+    // The 1M and 2M figures can be the longest too.
+    let q = ll_radio.RadioProfile { known: true, fast: false, octet_ns: 1000, slow_1m: 200, slow_2m: 100, slow_cod: 50,
+                                    fast_1m: 10, fast_2m: 20, fast_cod: 30 }
+    test.assert_eq(ll_radio.ramp_slow_worst(q), 200)
+    let r = ll_radio.RadioProfile { known: true, fast: false, octet_ns: 1000, slow_1m: 10, slow_2m: 150, slow_cod: 50,
+                                    fast_1m: 10, fast_2m: 20, fast_cod: 30 }
+    test.assert_eq(ll_radio.ramp_slow_worst(r), 150)
+
+// ── A radio asked for its profile ────────────────────────────────────
+
+@test
+fn test_profile_of_reads_the_ramp_up_of_each_phy_in_both_modes()
+    var fast = fake_air(true, true)
+    let p = ll_radio.profile_of(var fast)
+    test.assert(p.known)
+    test.assert(p.fast)
+    test.assert_eq(p.octet_ns, 700)
+    test.assert_eq(p.slow_1m, 145)
+    test.assert_eq(p.slow_2m, 140)
+    test.assert_eq(p.slow_cod, 150)
+    test.assert_eq(p.fast_1m, 40)
+    test.assert_eq(p.fast_2m, 40)
+    test.assert_eq(p.fast_cod, 40)
+
+@test
+fn test_profile_of_a_radio_without_a_fast_ramp_up_reports_the_legacy_figure_for_both()
+    var slow = fake_air(false, false)
+    let p = ll_radio.profile_of(var slow)
+    test.assert(p.known)
+    test.assert(not p.fast)
+    test.assert_eq(p.fast_1m, p.slow_1m)
+    test.assert_eq(p.fast_2m, p.slow_2m)
+    test.assert_eq(p.fast_cod, p.slow_cod)
+    test.assert_eq(ll_radio.ramp_best_worst(p), ll_radio.ramp_slow_worst(p))
+
+// ── The contract of Timebase ─────────────────────────────────────────
+
+@test
+fn test_the_clock_never_goes_back_and_waits_until_the_time_given()
+    var air = fake_air(false, false)
+    let t0 = air.now_us()
+    air.wait_until(t0 + 250)
+    test.assert_eq(air.now_us(), t0 + 250)
+    // A wait for a time that has passed returns at once and leaves the clock where it was.
+    air.wait_until(t0)
+    test.assert_eq(air.now_us(), t0 + 250)
+
+@test
+fn test_the_stamp_counter_measures_a_span_in_stamps_per_microsecond()
+    var air = fake_air(false, false)
+    let s0 = air.stamp()
+    let t0 = air.now_us()
+    air.wait_until(t0 + 40)
+    let span = (air.stamp() - s0) & 0xFFFFFFFF
+    test.assert_eq(span, 40 * air.stamps_per_us())
+    test.assert_eq(air.cycles(), 0)
+    air.cycle = 123
+    test.assert_eq(air.cycles(), 123)
+
+@test
+fn test_the_stamp_counter_span_survives_the_wrap_of_32_bits()
+    var air = fake_air(false, false)
+    air.now = 268435450
+    let s0 = air.stamp()
+    air.wait_until(268435450 + 30)
+    let span = (air.stamp() - s0) & 0xFFFFFFFF
+    test.assert_eq(span, 30 * air.stamps_per_us())
+
+// ── The contract of Radio ────────────────────────────────────────────
+
+@test
+fn test_config_brings_the_phy_the_ramp_up_the_whitening_and_the_power_back()
+    var air = fake_air(true, true)
+    air.phy(ll_phy.PHY_CODED, true)
+    air.ramp(true)
+    air.whitening(false)
+    test.assert_eq(air.power(-8), -8)
+    air.config(ll_radio.ADV_ACCESS_ADDRESS, ll_radio.ADV_CRC_INIT, ll_radio.ADV_MAXLEN)
+    test.assert_eq(air.aa, ll_radio.ADV_ACCESS_ADDRESS)
+    test.assert_eq(air.crc, ll_radio.ADV_CRC_INIT)
+    test.assert_eq(air.maxlen, ll_radio.ADV_MAXLEN)
+    test.assert_eq(air.phy, ll_phy.PHY_1M)
+    test.assert(not air.fast_on)
+    test.assert(air.white)
+    test.assert_eq(air.pwr, 0)
+
+@test
+fn test_phy_sets_the_phy_and_the_coding_and_the_leads_follow()
+    var air = fake_air(true, true)
+    let lead_1m = air.tx_lead_us()
+    air.phy(ll_phy.PHY_2M, false)
+    test.assert_eq(air.phy, ll_phy.PHY_2M)
+    test.assert(air.tx_lead_us() < lead_1m)
+    air.phy(ll_phy.PHY_CODED, true)
+    test.assert(air.s8)
+    test.assert(air.tx_lead_us() > lead_1m)
+    test.assert_eq(air.rx_lead_us(), air.tx_lead_us() + ll_radio.RX_MARGIN_US)
+
+@test
+fn test_a_radio_may_refuse_a_phy()
+    var coded = fake_air(false, true)
+    var plain = fake_air(false, false)
+    for phy in [ll_phy.PHY_1M, ll_phy.PHY_2M]
+        test.assert(coded.supports_phy(phy))
+        test.assert(plain.supports_phy(phy))
+    test.assert(coded.supports_phy(ll_phy.PHY_CODED))
+    test.assert(not plain.supports_phy(ll_phy.PHY_CODED))
+
+@test
+fn test_the_fast_ramp_up_shortens_the_leads_only_on_a_radio_that_has_it()
+    var fast = fake_air(true, false)
+    let slow_lead = fast.tx_lead_us()
+    test.assert(fast.has_fast_ramp())
+    fast.ramp(true)
+    test.assert(fast.tx_lead_us() < slow_lead)
+    fast.ramp(false)
+    test.assert_eq(fast.tx_lead_us(), slow_lead)
+    var none = fake_air(false, false)
+    test.assert(not none.has_fast_ramp())
+    none.ramp(true)
+    test.assert_eq(none.tx_lead_us(), slow_lead)
+
+@test
+fn test_power_answers_the_level_set_nearest_the_one_asked()
+    var air = fake_air(false, false)
+    test.assert_eq(air.power(4), 4)
+    test.assert_eq(air.power(20), 8)
+    test.assert_eq(air.power(-90), -40)
+    test.assert_eq(air.pwr, -40)
+
+@test
+fn test_hold_and_release_pair()
+    var air = fake_air(false, false)
+    air.hold()
+    test.assert_eq(air.held, 1)
+    air.release()
+    test.assert_eq(air.held, 0)
+
+@test
+fn test_the_buffers_hold_the_octets_put_in_them_and_set_one_at_a_time()
+    var air = fake_air(false, false)
+    var p = ll_pdu.pdu_new()
+    ll_pdu.pdu_begin(var p, ll_pdu.ADV_NONCONN_IND, 0, 0)
+    for i in 0..6
+        let _x = ll_pdu.pdu_put(var p, 0x10 + i)
+    ll_pdu.pdu_finish(var p)
+    air.put(ll_radio.BUF_ANS, var p)
+    test.assert_eq(air.octet(ll_radio.BUF_ANS, 0), 2)
+    test.assert_eq(air.octet(ll_radio.BUF_ANS, 1), 6)
+    test.assert_eq(air.octet(ll_radio.BUF_ANS, 7), 0x15)
+    test.assert_eq(air.octet(ll_radio.BUF_TX, 7), 0)
+    air.set_octet(ll_radio.BUF_ANS, 7, 0x1FF)
+    test.assert_eq(air.octet(ll_radio.BUF_ANS, 7), 0xFF)
+    // `read` copies a range of the buffer, `read_pdu` the first octets and the length.
+    var head = ll_pdu.pdu_new()
+    air.read(ll_radio.BUF_ANS, var head, 0, 2)
+    test.assert_eq(ll_pdu.pdu_type(var head), ll_pdu.ADV_NONCONN_IND)
+    test.assert_eq(ll_pdu.pdu_len(var head), 6)
+    var all = ll_pdu.pdu_new()
+    air.read_pdu(ll_radio.BUF_ANS, var all, 8)
+    test.assert_eq(all.n, 8)
+    test.assert_eq(ll_pdu.pdu_get(var all, 2), 0x10)
+    test.assert_eq(ll_pdu.pdu_get(var all, 7), 0xFF)
+
+@test
+fn test_the_events_are_cleared_by_the_calls_that_name_them()
+    var air = fake_air(false, false)
+    air.addr_ev = true
+    air.end_ev = true
+    air.clear_address()
+    test.assert(not air.address_seen())
+    test.assert(air.end_ev)
+    air.addr_ev = true
+    air.clear_done()
+    test.assert(air.address_seen())
+    test.assert(not air.end_ev)
+    air.end_ev = true
+    air.clear_packet()
+    test.assert(not air.address_seen())
+    test.assert(not air.end_ev)
+    air.addr_ev = true
+    air.end_ev = true
+    air.clear_all()
+    test.assert(not air.address_seen())
+    test.assert(not air.end_ev)
+
+@test
+fn test_arm_and_disarm_set_what_the_radio_does_when_a_packet_ends()
+    var air = fake_air(false, false)
+    air.arm(ll_radio.THEN_TX, false)
+    test.assert_eq(air.next, ll_radio.THEN_TX)
+    test.assert_eq(air.turnaround_ns(), (ll_radio.T_IFS_US - 1) * 1000)
+    air.arm(ll_radio.THEN_RX, true)
+    test.assert_eq(air.next, ll_radio.THEN_RX)
+    air.disarm()
+    test.assert_eq(air.next, ll_radio.THEN_REST)
+    test.assert_eq(air.turnaround_ns(), ll_radio.NOT_MEASURED)
+
+@test
+fn test_halt_takes_the_radio_to_rest_and_wait_disabled_says_so()
+    var air = fake_air(false, false)
+    air.start_rx()
+    test.assert(not air.wait_disabled())
+    air.arm(ll_radio.THEN_TX, false)
+    air.halt()
+    test.assert(air.wait_disabled())
+    test.assert_eq(air.next, ll_radio.THEN_REST)
+
+@test
+fn test_the_waits_report_a_packet_that_did_not_come()
+    var air = fake_air(false, false)
+    // Nothing started: no access address, no end of packet, no packet to receive.
+    test.assert(not air.wait_address(air.now_us() + 500))
+    test.assert(not air.wait_phyend())
+    test.assert_eq(air.wait_rx(), ll_radio.RX_TIMEOUT)
+    // A transmitter is not a receiver.
+    air.start_tx()
+    test.assert_eq(air.wait_rx(), ll_radio.RX_TIMEOUT)
+    // An access address that falls after the limit is not reported.
+    var late = fake_air(false, false)
+    late.start_tx()
+    test.assert(not late.wait_address(late.now_us() + 10))
+
+@test
+fn test_a_receiver_reports_the_crc_verdict_the_signal_and_the_marks()
+    var air = fake_air(false, false)
+    air.start_rx()
+    test.assert(air.wait_address(air.now_us() + 1000))
+    let mark = air.address_mark()
+    test.assert_eq(air.mark_us(mark), mark)
+    test.assert_eq(air.wait_rx(), ll_radio.RX_GOOD)
+    test.assert_eq(air.rssi_dbm(), -60)
+    test.assert_eq(air.rx_stamp_us(), 3)
+    air.bad_crc = true
+    air.start_rx()
+    test.assert_eq(air.wait_rx(), ll_radio.RX_BAD)
+
+@test
+fn test_octet_work_is_reported_in_nanoseconds()
+    var air = fake_air(false, false)
+    test.assert_eq(air.octet_work_ns(), 700)
+
+// ── A program over the traits ────────────────────────────────────────
+
+fn adv_ind() -> Pdu
+    var p = ll_pdu.pdu_new()
+    var a: Vec[u8; 6] = Vec.new()
+    for i in 0..6
+        let _x = a.push((0xC0 + i) as u8)
+    ll_pdu.pdu_begin(var p, ll_pdu.ADV_IND, 1, 0)
+    ll_pdu.pdu_put_addr(var p, var a)
+    ll_pdu.pdu_finish(var p)
+    p
+
+@test
+fn test_an_advertising_event_runs_on_any_radio_and_clock()
+    var air = fake_air(true, true)
+    var rx = ll_pdu.pdu_new()
+    var peer = adv_ind()
+    var adv = adv_ind()
+    air.put(ll_radio.BUF_RX, var peer)
+    let verdict = exchange(var air, var adv, var rx)
+    test.assert_eq(verdict, ll_radio.RX_GOOD)
+    test.assert_eq(air.aa, ll_radio.ADV_ACCESS_ADDRESS)
+    test.assert_eq(air.ch, 37)
+    test.assert_eq(rx.n, 14)
+    // What the radio sent is what the program put in the buffer, and what it read is what the peer left in the other.
+    test.assert_eq(air.octet(ll_radio.BUF_TX, 0), 0x40)
+    test.assert_eq(air.octet(ll_radio.BUF_TX, 1), 6)
+    test.assert_eq(air.octet(ll_radio.BUF_RX, 2), 0xC0)
+    test.assert_eq(ll_pdu.pdu_get(var rx, 2), 0xC0)
+    test.assert(air.wait_disabled())
+
+@test
+fn test_an_advertising_event_reports_a_bad_crc()
+    var adv = adv_ind()
+    var air = fake_air(false, false)
+    air.bad_crc = true
+    var rx = ll_pdu.pdu_new()
+    test.assert_eq(exchange(var air, var adv, var rx), ll_radio.RX_BAD)
+    test.assert_eq(rx.n, 0)
+
+@test
+fn test_the_program_gives_up_on_a_radio_that_raises_no_access_address()
+    var adv = adv_ind()
+    var air = fake_air(false, false)
+    air.no_address = true
+    var rx = ll_pdu.pdu_new()
+    test.assert_eq(exchange(var air, var adv, var rx), -1)
+    test.assert(air.wait_disabled())
+
+@test
+fn test_the_program_gives_up_on_a_packet_that_never_ends()
+    var adv = adv_ind()
+    var air = fake_air(false, false)
+    air.no_end = true
+    var rx = ll_pdu.pdu_new()
+    test.assert_eq(exchange(var air, var adv, var rx), -2)
+    test.assert(air.wait_disabled())

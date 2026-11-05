@@ -1,0 +1,324 @@
+// tests/ll_pdu_tests.nv — the unit tests of src/ll_pdu.nv: the header bits, the fixed buffer of a PDU, the writers and
+// readers of an address, and the checks a received advertising PDU passes.
+//
+//   novo test tests/ll_pdu_tests.nv
+
+use std.test
+use ll_pdu.{ ADDR_OCTETS, ADDR_PUBLIC, ADDR_RANDOM, ADV_DIRECT_IND, ADV_IND, ADV_NONCONN_IND, ADV_SCAN_IND, CHSEL, CONNECT_IND, CONNECT_PAYLOAD, DATA_MAX, DATA_OCTETS_MAX, DIRECT_PAYLOAD, PAYLOAD_MAX, PDU_CAP, PDU_OCTETS, Pdu, RXADD, SCAN_REQ, SCAN_REQ_PAYLOAD, SCAN_RSP, TXADD, airtime_us, pdu_addr_get, pdu_addr_is, pdu_begin, pdu_clear, pdu_finish, pdu_get, pdu_len, pdu_new, pdu_put, pdu_put_addr, pdu_put_data, pdu_rx_add, pdu_tx_add, pdu_type, pdu_well_formed, report_event_type, type_is_advertising, type_is_scannable }
+
+// An address of six octets, `first` to `first + 5`.
+fn t_addr(first: Int) -> Vec[u8; 6]
+    var a: Vec[u8; 6] = Vec.new()
+    for i in 0..6
+        let _x = a.push((first + i) as u8)
+    a
+
+// A PDU of `ty` with `payload_len` zero octets after the header, its length octet written.
+fn t_pdu(ty: Int, payload_len: Int) -> Pdu
+    var p = pdu_new()
+    pdu_begin(var p, ty, 0, 0)
+    for _ in 0..payload_len
+        let _x = pdu_put(var p, 0)
+    pdu_finish(var p)
+    p
+
+// ── The buffer ───────────────────────────────────────────────────────
+
+@test
+fn test_capacity_matches_the_constants()
+    let p = pdu_new()
+    test.assert_eq(p.b.capacity(), PDU_CAP)
+    test.assert_eq(p.b.len(), PDU_CAP)
+    test.assert_eq(p.n, 0)
+    test.assert(PDU_OCTETS <= PDU_CAP)
+    test.assert(DATA_OCTETS_MAX <= PDU_CAP)
+    test.assert_eq(PAYLOAD_MAX + 2, PDU_OCTETS)
+    test.assert_eq(2 + 251 + 4, DATA_OCTETS_MAX)
+
+@test
+fn test_the_fixed_payload_sizes_follow_the_address_size()
+    test.assert_eq(ADDR_OCTETS, 6)
+    test.assert_eq(SCAN_REQ_PAYLOAD, 2 * ADDR_OCTETS)
+    test.assert_eq(DIRECT_PAYLOAD, 2 * ADDR_OCTETS)
+    test.assert_eq(CONNECT_PAYLOAD, 2 * ADDR_OCTETS + 22)
+    test.assert_eq(DATA_MAX + ADDR_OCTETS, PAYLOAD_MAX)
+
+@test
+fn test_the_pdu_types_and_the_header_bits_are_the_specification_values()
+    test.assert_eq(ADV_IND, 0)
+    test.assert_eq(ADV_DIRECT_IND, 1)
+    test.assert_eq(ADV_NONCONN_IND, 2)
+    test.assert_eq(SCAN_REQ, 3)
+    test.assert_eq(SCAN_RSP, 4)
+    test.assert_eq(CONNECT_IND, 5)
+    test.assert_eq(ADV_SCAN_IND, 6)
+    test.assert_eq(CHSEL, 0x20)
+    test.assert_eq(TXADD, 0x40)
+    test.assert_eq(RXADD, 0x80)
+    test.assert_eq(ADDR_PUBLIC, 0)
+    test.assert_eq(ADDR_RANDOM, 1)
+
+@test
+fn test_clear_forgets_the_octets_written()
+    var p = t_pdu(ADV_IND, 6)
+    test.assert_eq(p.n, 8)
+    pdu_clear(var p)
+    test.assert_eq(p.n, 0)
+    test.assert_eq(pdu_get(var p, 0), -1)
+
+@test
+fn test_put_keeps_the_low_octet_of_the_value()
+    var p = pdu_new()
+    test.assert(pdu_put(var p, 0x1FF))
+    test.assert(pdu_put(var p, -1))
+    test.assert_eq(pdu_get(var p, 0), 0xFF)
+    test.assert_eq(pdu_get(var p, 1), 0xFF)
+
+@test
+fn test_put_stops_when_the_pdu_is_full()
+    var p = pdu_new()
+    for _ in 0..PDU_OCTETS
+        test.assert(pdu_put(var p, 1))
+    test.assert(not pdu_put(var p, 1))
+    test.assert_eq(p.n, PDU_OCTETS)
+
+@test
+fn test_put_data_runs_to_the_longest_data_pdu_and_stops_there()
+    var p = pdu_new()
+    for i in 0..DATA_OCTETS_MAX
+        test.assert(pdu_put_data(var p, i))
+    test.assert(not pdu_put_data(var p, 1))
+    test.assert_eq(p.n, DATA_OCTETS_MAX)
+    test.assert_eq(pdu_get(var p, 0), 0)
+    test.assert_eq(pdu_get(var p, 256), 0)
+    test.assert_eq(pdu_get(var p, 255), 255)
+    test.assert_eq(pdu_get(var p, DATA_OCTETS_MAX), -1)
+    // The advertising writer refuses what the data writer accepted.
+    test.assert(not pdu_put(var p, 1))
+
+@test
+fn test_put_data_keeps_the_low_octet_of_the_value()
+    var p = pdu_new()
+    test.assert(pdu_put_data(var p, 0x3A5))
+    test.assert_eq(pdu_get(var p, 0), 0xA5)
+
+@test
+fn test_get_answers_minus_one_outside_what_was_written()
+    var p = pdu_new()
+    let _x = pdu_put(var p, 7)
+    test.assert_eq(pdu_get(var p, 0), 7)
+    test.assert_eq(pdu_get(var p, 1), -1)
+    test.assert_eq(pdu_get(var p, -1), -1)
+    test.assert_eq(pdu_get(var p, 1000), -1)
+
+// ── The header ───────────────────────────────────────────────────────
+
+@test
+fn test_header_carries_type_and_address_bits()
+    var p = pdu_new()
+    pdu_begin(var p, ADV_IND, 1, 0)
+    test.assert_eq(pdu_type(var p), ADV_IND)
+    test.assert_eq(pdu_tx_add(var p), 1)
+    test.assert_eq(pdu_rx_add(var p), 0)
+    pdu_begin(var p, SCAN_REQ, 0, 1)
+    test.assert_eq(pdu_type(var p), SCAN_REQ)
+    test.assert_eq(pdu_tx_add(var p), 0)
+    test.assert_eq(pdu_rx_add(var p), 1)
+    test.assert_eq(pdu_get(var p, 0), 0x83)
+    pdu_begin(var p, CONNECT_IND, 1, 1)
+    test.assert_eq(pdu_get(var p, 0), 0xC5)
+    test.assert_eq(p.n, 2)
+    test.assert_eq(pdu_get(var p, 1), 0)
+
+@test
+fn test_begin_discards_what_the_pdu_held()
+    var p = t_pdu(ADV_IND, 20)
+    pdu_begin(var p, ADV_NONCONN_IND, 0, 0)
+    test.assert_eq(p.n, 2)
+    test.assert_eq(pdu_type(var p), ADV_NONCONN_IND)
+
+@test
+fn test_the_type_is_the_low_four_bits_and_the_length_the_low_six()
+    var p = pdu_new()
+    let _a = pdu_put(var p, 0xF5)
+    let _b = pdu_put(var p, 0xC9)
+    test.assert_eq(pdu_type(var p), 5)
+    test.assert_eq(pdu_len(var p), 9)
+    // ChSel (bit 5) is not part of the type.
+    test.assert_eq(pdu_get(var p, 0) & CHSEL, CHSEL)
+
+@test
+fn test_finish_writes_the_payload_length()
+    var p = pdu_new()
+    var a = t_addr(1)
+    pdu_begin(var p, ADV_NONCONN_IND, 0, 0)
+    pdu_put_addr(var p, var a)
+    let _x = pdu_put(var p, 2)
+    let _y = pdu_put(var p, 1)
+    let _z = pdu_put(var p, 6)
+    pdu_finish(var p)
+    test.assert_eq(p.n, 11)
+    test.assert_eq(pdu_len(var p), 9)
+    test.assert_eq(pdu_get(var p, 1), 9)
+    test.assert_eq(pdu_get(var p, 2), 1)
+    test.assert_eq(pdu_get(var p, 7), 6)
+    test.assert_eq(pdu_get(var p, 11), -1)
+
+@test
+fn test_finish_leaves_a_pdu_without_a_length_octet_as_it_is()
+    var p = pdu_new()
+    pdu_finish(var p)
+    test.assert_eq(p.n, 0)
+    let _x = pdu_put(var p, 3)
+    pdu_finish(var p)
+    test.assert_eq(p.n, 1)
+    test.assert_eq(pdu_get(var p, 0), 3)
+
+// ── Addresses ────────────────────────────────────────────────────────
+
+@test
+fn test_address_compare_and_copy()
+    var p = pdu_new()
+    var a = t_addr(0x10)
+    pdu_begin(var p, SCAN_REQ, 0, 0)
+    pdu_put_addr(var p, var a)
+    var b = t_addr(0x20)
+    pdu_put_addr(var p, var b)
+    pdu_finish(var p)
+    test.assert(pdu_addr_is(var p, 0, var a))
+    test.assert(pdu_addr_is(var p, 6, var b))
+    test.assert(not pdu_addr_is(var p, 0, var b))
+    var c = t_addr(0)
+    pdu_addr_get(var p, 6, var c)
+    test.assert_eq(c[0] as Int, 0x20)
+    test.assert_eq(c[5] as Int, 0x25)
+
+@test
+fn test_an_address_that_differs_in_one_octet_is_not_equal()
+    var p = pdu_new()
+    var a = t_addr(0x30)
+    pdu_begin(var p, ADV_IND, 0, 0)
+    pdu_put_addr(var p, var a)
+    var last = t_addr(0x30)
+    last[5] = 0x99
+    var first = t_addr(0x30)
+    first[0] = 0x99
+    test.assert(pdu_addr_is(var p, 0, var a))
+    test.assert(not pdu_addr_is(var p, 0, var last))
+    test.assert(not pdu_addr_is(var p, 0, var first))
+
+@test
+fn test_put_addr_stops_at_the_end_of_an_advertising_pdu()
+    var p = pdu_new()
+    var a = t_addr(1)
+    for _ in 0..PDU_OCTETS - 3
+        let _x = pdu_put(var p, 0)
+    pdu_put_addr(var p, var a)
+    // Three octets fit; the rest are dropped.
+    test.assert_eq(p.n, PDU_OCTETS)
+    test.assert_eq(pdu_get(var p, PDU_OCTETS - 1), 3)
+
+// ── The checks of a received PDU ─────────────────────────────────────
+
+@test
+fn test_well_formed_checks_each_types_length()
+    var p = pdu_new()
+    var a = t_addr(1)
+    pdu_begin(var p, ADV_IND, 0, 0)
+    pdu_put_addr(var p, var a)
+    pdu_finish(var p)
+    test.assert(pdu_well_formed(var p, 8))
+    test.assert(not pdu_well_formed(var p, 9))
+    test.assert(not pdu_well_formed(var p, 1))
+    // An ADV_IND with a payload of 5 is too short.
+    p.b[1] = 5
+    test.assert(not pdu_well_formed(var p, 7))
+    // ADV_DIRECT_IND is exactly 12, SCAN_REQ exactly 12, CONNECT_IND 34.
+    pdu_begin(var p, ADV_DIRECT_IND, 0, 0)
+    pdu_put_addr(var p, var a)
+    pdu_put_addr(var p, var a)
+    pdu_finish(var p)
+    test.assert(pdu_well_formed(var p, 14))
+    p.b[0] = SCAN_REQ as u8
+    test.assert(pdu_well_formed(var p, 14))
+    p.b[0] = CONNECT_IND as u8
+    test.assert(not pdu_well_formed(var p, 14))
+    p.b[0] = 7
+    test.assert(not pdu_well_formed(var p, 14))
+
+@test
+fn test_well_formed_takes_the_four_advertisement_types_from_six_to_thirty_seven_octets()
+    for ty in [ADV_IND, ADV_SCAN_IND, ADV_NONCONN_IND, SCAN_RSP]
+        var short = t_pdu(ty, ADDR_OCTETS - 1)
+        var low = t_pdu(ty, ADDR_OCTETS)
+        var high = t_pdu(ty, PAYLOAD_MAX)
+        test.assert(not pdu_well_formed(var short, ADDR_OCTETS + 1))
+        test.assert(pdu_well_formed(var low, ADDR_OCTETS + 2))
+        test.assert(pdu_well_formed(var high, PAYLOAD_MAX + 2))
+    // A header that claims 38 octets is out of range whatever the octets received.
+    var over = t_pdu(ADV_IND, PAYLOAD_MAX)
+    over.b[1] = 38
+    test.assert(not pdu_well_formed(var over, 40))
+
+@test
+fn test_well_formed_takes_the_fixed_types_at_their_one_length()
+    var direct = t_pdu(ADV_DIRECT_IND, DIRECT_PAYLOAD)
+    var req = t_pdu(SCAN_REQ, SCAN_REQ_PAYLOAD)
+    var connect = t_pdu(CONNECT_IND, CONNECT_PAYLOAD)
+    test.assert(pdu_well_formed(var direct, DIRECT_PAYLOAD + 2))
+    test.assert(pdu_well_formed(var req, SCAN_REQ_PAYLOAD + 2))
+    test.assert(pdu_well_formed(var connect, CONNECT_PAYLOAD + 2))
+    var direct_short = t_pdu(ADV_DIRECT_IND, DIRECT_PAYLOAD - 1)
+    var req_long = t_pdu(SCAN_REQ, SCAN_REQ_PAYLOAD + 1)
+    var connect_short = t_pdu(CONNECT_IND, CONNECT_PAYLOAD - 1)
+    test.assert(not pdu_well_formed(var direct_short, DIRECT_PAYLOAD + 1))
+    test.assert(not pdu_well_formed(var req_long, SCAN_REQ_PAYLOAD + 3))
+    test.assert(not pdu_well_formed(var connect_short, CONNECT_PAYLOAD + 1))
+
+@test
+fn test_well_formed_refuses_a_length_that_disagrees_with_the_octets_received()
+    var p = t_pdu(ADV_IND, 10)
+    test.assert(pdu_well_formed(var p, 12))
+    test.assert(not pdu_well_formed(var p, 11))
+    test.assert(not pdu_well_formed(var p, 13))
+    test.assert(not pdu_well_formed(var p, 0))
+
+@test
+fn test_well_formed_refuses_a_type_that_is_none()
+    for ty in [7, 8, 15]
+        var p = t_pdu(ty, 12)
+        test.assert(not pdu_well_formed(var p, 14))
+
+@test
+fn test_type_classes()
+    test.assert(type_is_advertising(ADV_IND))
+    test.assert(type_is_advertising(ADV_DIRECT_IND))
+    test.assert(type_is_advertising(ADV_NONCONN_IND))
+    test.assert(type_is_advertising(ADV_SCAN_IND))
+    test.assert(not type_is_advertising(SCAN_REQ))
+    test.assert(not type_is_advertising(SCAN_RSP))
+    test.assert(not type_is_advertising(CONNECT_IND))
+    test.assert(type_is_scannable(ADV_IND))
+    test.assert(type_is_scannable(ADV_SCAN_IND))
+    test.assert(not type_is_scannable(ADV_NONCONN_IND))
+    test.assert(not type_is_scannable(ADV_DIRECT_IND))
+    test.assert(not type_is_scannable(SCAN_REQ))
+
+@test
+fn test_report_event_types_follow_the_hci_numbering()
+    test.assert_eq(report_event_type(ADV_IND), 0)
+    test.assert_eq(report_event_type(ADV_DIRECT_IND), 1)
+    test.assert_eq(report_event_type(ADV_SCAN_IND), 2)
+    test.assert_eq(report_event_type(ADV_NONCONN_IND), 3)
+    test.assert_eq(report_event_type(SCAN_RSP), 4)
+    test.assert_eq(report_event_type(SCAN_REQ), -1)
+    test.assert_eq(report_event_type(CONNECT_IND), -1)
+    test.assert_eq(report_event_type(9), -1)
+
+@test
+fn test_airtime_of_a_full_advertisement()
+    // 2 header octets and 6 + 31 payload octets: 39 octets, 47 with the
+    // preamble, access address and CRC, 376 microseconds.
+    test.assert_eq(airtime_us(39), 376)
+    test.assert_eq(airtime_us(14), 176)
+    test.assert_eq(airtime_us(0), 64)

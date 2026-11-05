@@ -2,10 +2,28 @@
 name        = "noble-radio"
 version     = "0.1.0"
 description = "The traits between the noble Link Layer and a chip (Radio, Timebase, Cipher, Ecdh) with the PDU and PHY types they name; no register, no chip."
+license     = "Apache-2.0"
+stability   = "experimental"
 category    = "networking"
 layer       = "core"
+tags        = ["bluetooth", "ble", "link-layer", "radio", "phy", "pdu", "hal", "embedded"]
+repository  = "https://github.com/novolang/noble-radio"
+maintainers = ["novo-lang"]
+novo        = ">= 0.23.1"
 
-# The embedded tier of orbit/ble, whose Controller depends on this package.
+# A library: no `main`, so `novo pkg build` type-checks and effect-checks every module under `src/` and writes no binary.
+
+# The embedded tier of orbit/ble, whose Controller (noble-controller) and the Nordic nRF54 board packages depend on this package.
 [tier]
 tier   = "embedded"
 target = "nrf52832-dk"
+
+[docs.pages]
+"README.md"     = "The Link Layer's seam to a chip"
+"docs/radio.md" = "What a chip implements: Radio, Timebase, Cipher and Ecdh"
+
+[publish]
+coverage_floor = 0
+
+[dependencies]
+# None.  The modules import each other and nothing else.

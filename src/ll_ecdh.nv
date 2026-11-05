@@ -14,6 +14,8 @@
 // calls answer false then and `faults` counts it, so that the Controller ends the command
 // with Hardware Failure and not with the status for a key the Host sent.
 
+// What the Controller asks of a P-256 engine: the public key of a private key, the DHKey of a private key and a
+// peer's public key, and a count of the operations the engine failed to finish.  The effect `e` is the backend's.
 pub trait Ecdh[e]
     // The public key (X, Y) of `secret`, in `out`.  False when `secret` is no private key
     // (zero, or not below the order of the curve), so that the caller draws another.
@@ -27,8 +29,8 @@ pub trait Ecdh[e]
 // The word `i` of the private key of the Security Manager's Debug mode ([Vol 3] Part H,
 // Section 2.3.5.6.1), which LE Generate DHKey [v2] uses for a Key_Type of 1.  The specification
 // prints the key as eight words, the most significant first; word 0 here is the first printed.
-@tier(embedded)
-pub fn debug_key_word(i: Int) -> Int
+pub @tier(embedded)
+fn debug_key_word(i: Int) -> Int
     match i
         0 => 0x3F49F6D4
         1 => 0xA3C55F38
@@ -40,8 +42,8 @@ pub fn debug_key_word(i: Int) -> Int
         _ => 0xCD3C1ABD
 
 // That key in the order the HCI carries a key: 32 octets, the least significant first.
-@tier(embedded)
-pub fn debug_private_key() -> Vec[u8; 32]
+pub @tier(embedded)
+fn debug_private_key() -> Vec[u8; 32]
     var k: Vec[u8; 32] = Vec.new()
     for i in 0..32
         // Octet `i` from the least significant end is octet `31 - i` of the printed key.

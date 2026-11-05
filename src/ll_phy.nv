@@ -24,55 +24,65 @@
 // Nothing here knows a chip: the ramp-ups and the delays of a radio belong to the
 // backend of `Radio` (`ll_radio.nv`).  No function here allocates.
 
-use std.test
-
-// The PHYs, as HCI numbers them.
+// The PHYs, as HCI numbers them: LE 1M, LE 2M and LE Coded.
 pub const PHY_1M = 1
+// LE 2M, 4 microseconds an octet.
 pub const PHY_2M = 2
+// LE Coded, at S=8 or S=2.
 pub const PHY_CODED = 3
 
-// The same as bits of a mask.
+// The bit of LE 1M in a PHY mask, the bit field of LE Set PHY and LL_PHY_REQ.
 pub const MASK_1M = 1
+// The bit of LE 2M in a PHY mask.
 pub const MASK_2M = 2
+// The bit of LE Coded in a PHY mask.
 pub const MASK_CODED = 4
+// Every PHY of a mask.
 pub const MASK_ALL = 7
 
-// The PHY_Options of LE Set PHY.
+// The PHY_Options of LE Set PHY: no preference of coding on LE Coded.
 pub const OPT_NONE = 0
+// The PHY_Options bit that prefers S=2 coding on LE Coded.
 pub const OPT_S2 = 1
+// The PHY_Options bit that prefers S=8 coding on LE Coded.
 pub const OPT_S8 = 2
 
-// The octets of a data PDU's payload and the MIC of an encrypted one.
+// The octets of the MIC of an encrypted data PDU.
 pub const MIC_OCTETS = 4
+// The payload a data PDU always has room for, 27 octets.
 pub const PAYLOAD_MIN = 27
+// The longest payload of a data PDU with the Data Length Extension, 251 octets.
 pub const PAYLOAD_MAX = 251
 
-// The times of the data length parameters ([Vol 6] Part B, Table 4.8): 328 for a
-// packet of 27 octets on an uncoded PHY, 2120 for 251, 2704 for 27 on S=8, and
-// 17040 for 251.
+// The times of the data length parameters are those of [Vol 6] Part B, Table 4.8.  The shortest, in microseconds: a
+// packet of 27 octets on an uncoded PHY.
 pub const TIME_MIN = 328
+// The time of a packet of 251 octets on an uncoded PHY, in microseconds.
 pub const TIME_UNCODED_MAX = 2120
+// The time of a packet of 27 octets on LE Coded at S=8, in microseconds.
 pub const TIME_CODED_MIN = 2704
+// The time of a packet of 251 octets on LE Coded at S=8, in microseconds.
 pub const TIME_MAX = 17040
 
 // The lesser and the greater of two values.
-@tier(embedded)
-pub fn lesser(a: Int, b: Int) -> Int
+pub @tier(embedded)
+fn lesser(a: Int, b: Int) -> Int
     if a < b
         a
     else
         b
 
-@tier(embedded)
-pub fn greater(a: Int, b: Int) -> Int
+// The greater of two values.
+pub @tier(embedded)
+fn greater(a: Int, b: Int) -> Int
     if a > b
         a
     else
         b
 
 // The bit of the mask of a PHY, 0 for a number that is none.
-@tier(embedded)
-pub fn mask_of(phy: Int) -> Int
+pub @tier(embedded)
+fn mask_of(phy: Int) -> Int
     match phy
         1 => MASK_1M
         2 => MASK_2M
@@ -80,8 +90,8 @@ pub fn mask_of(phy: Int) -> Int
         _ => 0
 
 // The PHY a mask of one bit names, 0 when it has none or more than one.
-@tier(embedded)
-pub fn phy_of_mask(mask: Int) -> Int
+pub @tier(embedded)
+fn phy_of_mask(mask: Int) -> Int
     match mask
         1 => PHY_1M
         2 => PHY_2M
@@ -89,16 +99,16 @@ pub fn phy_of_mask(mask: Int) -> Int
         _ => 0
 
 // Whether `phy` is a number of a PHY.
-@tier(embedded)
-pub fn phy_valid(phy: Int) -> Bool
+pub @tier(embedded)
+fn phy_valid(phy: Int) -> Bool
     phy >= PHY_1M and phy <= PHY_CODED
 
 // The microseconds from the first bit of a packet to the end of its access
 // address, which the ADDRESS event of the radio marks: the preamble and the
 // access address, and on the LE Coded PHY the coding indicator and TERM1 too
 // (376 microseconds, as the radio of the nRF54L raises ADDRESS after them).
-@tier(embedded)
-pub fn aa_end_us(phy: Int) -> Int
+pub @tier(embedded)
+fn aa_end_us(phy: Int) -> Int
     match phy
         2 => 24
         3 => 376
@@ -106,8 +116,8 @@ pub fn aa_end_us(phy: Int) -> Int
 
 // The microseconds a packet with a PDU of `n` octets (the header, the payload
 // and the MIC) takes on `phy`; `s8` says the LE Coded PHY sends S=8, not S=2.
-@tier(embedded)
-pub fn air_us(phy: Int, s8: Bool, n: Int) -> Int
+pub @tier(embedded)
+fn air_us(phy: Int, s8: Bool, n: Int) -> Int
     if phy == PHY_2M
         return (n + 9) * 4
     if phy == PHY_CODED
@@ -119,8 +129,8 @@ pub fn air_us(phy: Int, s8: Bool, n: Int) -> Int
 // The most payload octets (without the MIC) that a packet of `us` microseconds
 // carries on `phy`, with the 2-octet header and a MIC of 4 octets reserved, so that
 // the answer holds for an encrypted PDU too.  -1 when not even an empty PDU fits.
-@tier(embedded)
-pub fn fit_octets(phy: Int, s8: Bool, us: Int) -> Int
+pub @tier(embedded)
+fn fit_octets(phy: Int, s8: Bool, us: Int) -> Int
     var n = 0
     if phy == PHY_2M
         n = us / 4 - 9
@@ -136,122 +146,39 @@ pub fn fit_octets(phy: Int, s8: Bool, us: Int) -> Int
 // Scanning (or initiating) on LE 1M and LE Coded takes turns in each interval: the LE 1M window, then the LE Coded
 // window ([Vol 6] Part B, Section 4.4.3.1).  Windows that together are longer than the interval share it in proportion.
 // The lengths, in the unit the arguments have, of the first and of the second window.
-@satisfies("REQ-BLE-CTL-092")
+pub @satisfies("REQ-BLE-CTL-092")
 @tier(embedded)
-pub fn split_first(interval: Int, w1: Int, wc: Int) -> Int
+fn split_first(interval: Int, w1: Int, wc: Int) -> Int
     if w1 + wc <= interval
         return w1
     interval * w1 / (w1 + wc)
 
-@satisfies("REQ-BLE-CTL-092")
+// The length of the second window of an interval shared by two, in the unit of the arguments; `split_first` gives the
+// first.
+pub @satisfies("REQ-BLE-CTL-092")
 @tier(embedded)
-pub fn split_second(interval: Int, w1: Int, wc: Int) -> Int
+fn split_second(interval: Int, w1: Int, wc: Int) -> Int
     if w1 + wc <= interval
         return wc
     interval - split_first(interval, w1, wc)
 
 // The longest packet the Link Layer receives or sends on `phy`: a PDU of the
 // longest payload and its MIC, at the slowest coding.
-@tier(embedded)
-pub fn air_max_us(phy: Int) -> Int
+pub @tier(embedded)
+fn air_max_us(phy: Int) -> Int
     air_us(phy, true, 2 + PAYLOAD_MAX + MIC_OCTETS)
 
 // An empty PDU, 2 octets of header with no payload, takes this long.
-@tier(embedded)
-pub fn air_empty_us(phy: Int, s8: Bool) -> Int
+pub @tier(embedded)
+fn air_empty_us(phy: Int, s8: Bool) -> Int
     air_us(phy, s8, 2)
 
 // The time the supported PHYs give a data length parameter of `us`, never above
 // the range of Table 4.8 or below its minimum.
-@tier(embedded)
-pub fn clamp_time(us: Int) -> Int
+pub @tier(embedded)
+fn clamp_time(us: Int) -> Int
     if us < TIME_MIN
         return TIME_MIN
     if us > TIME_MAX
         return TIME_MAX
     us
-
-// ── Tests ───────────────────────────────────────────────────────────
-
-@test
-fn test_masks_and_numbers_agree()
-    test.assert_eq(mask_of(PHY_1M), 1)
-    test.assert_eq(mask_of(PHY_2M), 2)
-    test.assert_eq(mask_of(PHY_CODED), 4)
-    test.assert_eq(mask_of(0), 0)
-    test.assert_eq(mask_of(4), 0)
-    test.assert_eq(phy_of_mask(1), PHY_1M)
-    test.assert_eq(phy_of_mask(2), PHY_2M)
-    test.assert_eq(phy_of_mask(4), PHY_CODED)
-    test.assert_eq(phy_of_mask(3), 0)
-    test.assert_eq(phy_of_mask(0), 0)
-    test.assert(phy_valid(1) and phy_valid(2) and phy_valid(3))
-    test.assert(not phy_valid(0) and not phy_valid(4))
-
-@test
-fn test_the_access_address_ends_at_the_time_of_its_phy()
-    test.assert_eq(aa_end_us(PHY_1M), 40)
-    test.assert_eq(aa_end_us(PHY_2M), 24)
-    test.assert_eq(aa_end_us(PHY_CODED), 376)
-    test.assert_eq(aa_end_us(0), 40)
-
-@test
-fn test_packet_times_match_the_limits_of_the_specification()
-    // Table 4.8: 27 octets and the MIC are 328 microseconds on an uncoded PHY at 1M
-    // (33 octets of PDU), 2704 on S=8, and 251 octets and the MIC are 2120 and 17040.
-    test.assert_eq(air_us(PHY_1M, true, 2 + 27 + 4), 328)
-    test.assert_eq(air_us(PHY_1M, true, 2 + 251 + 4), 2120)
-    test.assert_eq(air_us(PHY_CODED, true, 2 + 27 + 4), 2704)
-    test.assert_eq(air_us(PHY_CODED, true, 2 + 251 + 4), 17040)
-    // An empty PDU: 80 microseconds at 1M, 44 at 2M, 720 at S=8 and 462 at S=2.
-    test.assert_eq(air_empty_us(PHY_1M, true), 80)
-    test.assert_eq(air_empty_us(PHY_2M, true), 44)
-    test.assert_eq(air_empty_us(PHY_CODED, true), 720)
-    test.assert_eq(air_empty_us(PHY_CODED, false), 462)
-    // 2M takes half of 1M for the octets and 8 microseconds less in the preamble.
-    test.assert_eq(air_us(PHY_2M, true, 2 + 251 + 4), 1064)
-    test.assert_eq(air_max_us(PHY_CODED), TIME_MAX)
-
-@test
-fn test_a_time_gives_the_octets_that_fit_it()
-    // The default 328 microseconds and 27 octets, on every PHY that can send 27 in it.
-    test.assert_eq(fit_octets(PHY_1M, true, 328), 27)
-    test.assert_eq(fit_octets(PHY_CODED, true, 2704), 27)
-    test.assert_eq(fit_octets(PHY_1M, true, 2120), 251)
-    test.assert_eq(fit_octets(PHY_CODED, true, 17040), 251)
-    // 2M at 328 microseconds fits more than 27; at 2120 more than 251.
-    test.assert(fit_octets(PHY_2M, true, 328) > 27)
-    test.assert(fit_octets(PHY_2M, true, 2120) > 251)
-    // S=2 is four times as fast per octet as S=8.
-    test.assert(fit_octets(PHY_CODED, false, 2704) > 100)
-    // Too short for an empty PDU and its MIC.
-    test.assert(fit_octets(PHY_1M, true, 100) < 0)
-    // Every answer sends a packet that is no longer than the time.
-    for us in [328, 700, 1000, 2120, 2704, 5000, 17040]
-        for phy in [PHY_1M, PHY_2M, PHY_CODED]
-            let k = fit_octets(phy, true, us)
-            if k >= 0
-                test.assert(air_us(phy, true, 2 + k + MIC_OCTETS) <= us)
-                test.assert(air_us(phy, true, 2 + k + 1 + MIC_OCTETS) > us or k >= 251)
-            let k2 = fit_octets(phy, false, us)
-            if k2 >= 0
-                test.assert(air_us(phy, false, 2 + k2 + MIC_OCTETS) <= us)
-
-@test
-fn test_a_time_parameter_is_kept_in_the_range_of_the_table()
-    test.assert_eq(clamp_time(0), 328)
-    test.assert_eq(clamp_time(328), 328)
-    test.assert_eq(clamp_time(1000), 1000)
-    test.assert_eq(clamp_time(17040), 17040)
-    test.assert_eq(clamp_time(20000), 17040)
-
-@test
-fn test_two_windows_take_turns_in_an_interval_and_share_it_when_they_are_too_long()
-    test.assert_eq(split_first(100, 30, 20), 30)
-    test.assert_eq(split_second(100, 30, 20), 20)
-    test.assert_eq(split_first(100, 80, 80), 50)
-    test.assert_eq(split_second(100, 80, 80), 50)
-    test.assert_eq(split_first(100, 60, 20), 60)
-    test.assert_eq(split_first(90, 100, 50), 60)
-    test.assert_eq(split_second(90, 100, 50), 30)
-    test.assert_eq(split_first(16, 16, 16) + split_second(16, 16, 16), 16)

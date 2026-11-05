@@ -1,0 +1,148 @@
+// tests/ll_phy_tests.nv — the unit tests of src/ll_phy.nv: the PHY numbers and masks, the time a packet takes on air,
+// the payload a time allows, and the split of an interval between two scan windows.
+//
+//   novo test tests/ll_phy_tests.nv
+
+use std.test
+use ll_phy.{ MASK_1M, MASK_2M, MASK_ALL, MASK_CODED, MIC_OCTETS, OPT_NONE, OPT_S2, OPT_S8, PAYLOAD_MAX, PAYLOAD_MIN, PHY_1M, PHY_2M, PHY_CODED, TIME_CODED_MIN, TIME_MAX, TIME_MIN, TIME_UNCODED_MAX, aa_end_us, air_empty_us, air_max_us, air_us, clamp_time, fit_octets, greater, lesser, mask_of, phy_of_mask, phy_valid, split_first, split_second }
+
+@test
+fn test_the_phy_numbers_masks_and_options_are_the_specification_values()
+    test.assert_eq(PHY_1M, 1)
+    test.assert_eq(PHY_2M, 2)
+    test.assert_eq(PHY_CODED, 3)
+    test.assert_eq(MASK_1M, 1)
+    test.assert_eq(MASK_2M, 2)
+    test.assert_eq(MASK_CODED, 4)
+    test.assert_eq(MASK_ALL, MASK_1M | MASK_2M | MASK_CODED)
+    test.assert_eq(OPT_NONE, 0)
+    test.assert_eq(OPT_S2, 1)
+    test.assert_eq(OPT_S8, 2)
+    test.assert_eq(MIC_OCTETS, 4)
+    test.assert_eq(PAYLOAD_MIN, 27)
+    test.assert_eq(PAYLOAD_MAX, 251)
+
+@test
+fn test_the_data_length_times_are_the_packet_times_of_the_payload_limits()
+    test.assert_eq(TIME_MIN, air_us(PHY_1M, true, 2 + PAYLOAD_MIN + MIC_OCTETS))
+    test.assert_eq(TIME_UNCODED_MAX, air_us(PHY_1M, true, 2 + PAYLOAD_MAX + MIC_OCTETS))
+    test.assert_eq(TIME_CODED_MIN, air_us(PHY_CODED, true, 2 + PAYLOAD_MIN + MIC_OCTETS))
+    test.assert_eq(TIME_MAX, air_us(PHY_CODED, true, 2 + PAYLOAD_MAX + MIC_OCTETS))
+
+@test
+fn test_the_lesser_and_the_greater_of_two_values()
+    test.assert_eq(lesser(1, 2), 1)
+    test.assert_eq(lesser(2, 1), 1)
+    test.assert_eq(lesser(3, 3), 3)
+    test.assert_eq(greater(1, 2), 2)
+    test.assert_eq(greater(2, 1), 2)
+    test.assert_eq(greater(-4, -9), -4)
+    test.assert_eq(greater(3, 3), 3)
+
+@test
+fn test_masks_and_numbers_agree()
+    test.assert_eq(mask_of(PHY_1M), 1)
+    test.assert_eq(mask_of(PHY_2M), 2)
+    test.assert_eq(mask_of(PHY_CODED), 4)
+    test.assert_eq(mask_of(0), 0)
+    test.assert_eq(mask_of(4), 0)
+    test.assert_eq(phy_of_mask(1), PHY_1M)
+    test.assert_eq(phy_of_mask(2), PHY_2M)
+    test.assert_eq(phy_of_mask(4), PHY_CODED)
+    test.assert_eq(phy_of_mask(3), 0)
+    test.assert_eq(phy_of_mask(0), 0)
+    test.assert_eq(phy_of_mask(MASK_ALL), 0)
+    test.assert(phy_valid(1) and phy_valid(2) and phy_valid(3))
+    test.assert(not phy_valid(0) and not phy_valid(4))
+    for phy in [PHY_1M, PHY_2M, PHY_CODED]
+        test.assert_eq(phy_of_mask(mask_of(phy)), phy)
+
+@test
+fn test_the_access_address_ends_at_the_time_of_its_phy()
+    test.assert_eq(aa_end_us(PHY_1M), 40)
+    test.assert_eq(aa_end_us(PHY_2M), 24)
+    test.assert_eq(aa_end_us(PHY_CODED), 376)
+    test.assert_eq(aa_end_us(0), 40)
+
+@test
+fn test_packet_times_match_the_limits_of_the_specification()
+    // Table 4.8: 27 octets and the MIC are 328 microseconds on an uncoded PHY at 1M
+    // (33 octets of PDU), 2704 on S=8, and 251 octets and the MIC are 2120 and 17040.
+    test.assert_eq(air_us(PHY_1M, true, 2 + 27 + 4), 328)
+    test.assert_eq(air_us(PHY_1M, true, 2 + 251 + 4), 2120)
+    test.assert_eq(air_us(PHY_CODED, true, 2 + 27 + 4), 2704)
+    test.assert_eq(air_us(PHY_CODED, true, 2 + 251 + 4), 17040)
+    // An empty PDU: 80 microseconds at 1M, 44 at 2M, 720 at S=8 and 462 at S=2.
+    test.assert_eq(air_empty_us(PHY_1M, true), 80)
+    test.assert_eq(air_empty_us(PHY_2M, true), 44)
+    test.assert_eq(air_empty_us(PHY_CODED, true), 720)
+    test.assert_eq(air_empty_us(PHY_CODED, false), 462)
+    // 2M takes half of 1M for the octets and 8 microseconds less in the preamble.
+    test.assert_eq(air_us(PHY_2M, true, 2 + 251 + 4), 1064)
+    test.assert_eq(air_max_us(PHY_CODED), TIME_MAX)
+
+@test
+fn test_the_s_setting_changes_only_the_coded_phy()
+    for n in [2, 33, 257]
+        test.assert_eq(air_us(PHY_1M, true, n), air_us(PHY_1M, false, n))
+        test.assert_eq(air_us(PHY_2M, true, n), air_us(PHY_2M, false, n))
+    test.assert_eq(air_us(PHY_CODED, false, 33), 376 + 36 * 16 + 6)
+    test.assert(air_us(PHY_CODED, false, 33) < air_us(PHY_CODED, true, 33))
+
+@test
+fn test_the_longest_packet_is_the_slowest_coding_of_each_phy()
+    test.assert_eq(air_max_us(PHY_1M), 2120)
+    test.assert_eq(air_max_us(PHY_2M), 1064)
+    test.assert_eq(air_max_us(PHY_CODED), 17040)
+
+@test
+fn test_a_time_gives_the_octets_that_fit_it()
+    // The default 328 microseconds and 27 octets, on every PHY that can send 27 in it.
+    test.assert_eq(fit_octets(PHY_1M, true, 328), 27)
+    test.assert_eq(fit_octets(PHY_CODED, true, 2704), 27)
+    test.assert_eq(fit_octets(PHY_1M, true, 2120), 251)
+    test.assert_eq(fit_octets(PHY_CODED, true, 17040), 251)
+    // 2M at 328 microseconds fits more than 27; at 2120 more than 251.
+    test.assert(fit_octets(PHY_2M, true, 328) > 27)
+    test.assert(fit_octets(PHY_2M, true, 2120) > 251)
+    // S=2 is four times as fast per octet as S=8.
+    test.assert(fit_octets(PHY_CODED, false, 2704) > 100)
+    // Too short for an empty PDU and its MIC.
+    test.assert(fit_octets(PHY_1M, true, 100) < 0)
+    test.assert(fit_octets(PHY_2M, true, 10) < 0)
+    test.assert(fit_octets(PHY_CODED, true, 100) < 0)
+    test.assert(fit_octets(PHY_CODED, false, 100) < 0)
+    // Every answer sends a packet that is no longer than the time.
+    for us in [328, 700, 1000, 2120, 2704, 5000, 17040]
+        for phy in [PHY_1M, PHY_2M, PHY_CODED]
+            let k = fit_octets(phy, true, us)
+            if k >= 0
+                test.assert(air_us(phy, true, 2 + k + MIC_OCTETS) <= us)
+                test.assert(air_us(phy, true, 2 + k + 1 + MIC_OCTETS) > us or k >= 251)
+            let k2 = fit_octets(phy, false, us)
+            if k2 >= 0
+                test.assert(air_us(phy, false, 2 + k2 + MIC_OCTETS) <= us)
+
+@test
+fn test_a_time_parameter_is_kept_in_the_range_of_the_table()
+    test.assert_eq(clamp_time(0), 328)
+    test.assert_eq(clamp_time(327), 328)
+    test.assert_eq(clamp_time(328), 328)
+    test.assert_eq(clamp_time(1000), 1000)
+    test.assert_eq(clamp_time(17040), 17040)
+    test.assert_eq(clamp_time(17041), 17040)
+    test.assert_eq(clamp_time(20000), 17040)
+
+@test
+fn test_two_windows_take_turns_in_an_interval_and_share_it_when_they_are_too_long()
+    test.assert_eq(split_first(100, 30, 20), 30)
+    test.assert_eq(split_second(100, 30, 20), 20)
+    test.assert_eq(split_first(100, 80, 80), 50)
+    test.assert_eq(split_second(100, 80, 80), 50)
+    test.assert_eq(split_first(100, 60, 20), 60)
+    test.assert_eq(split_first(90, 100, 50), 60)
+    test.assert_eq(split_second(90, 100, 50), 30)
+    test.assert_eq(split_first(16, 16, 16) + split_second(16, 16, 16), 16)
+    // Windows that exactly fill the interval are not cut.
+    test.assert_eq(split_first(50, 30, 20), 30)
+    test.assert_eq(split_second(50, 30, 20), 20)

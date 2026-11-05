@@ -1,0 +1,275 @@
+// tests/ll_cipher_tests.nv — the unit tests of src/ll_cipher.nv: the session key, the direction bits, and the contract
+// of `Cipher` as a small implementation of it keeps it.
+//
+// `ToyCipher` is not a cipher: it adds the key and the packet counter to each octet and seals with a four-octet checksum
+// over the header octet the direction selects.  It has the shape the Link Layer relies on: `seal` grows the PDU by the
+// MIC, `open` refuses a MIC that does not match, an empty PDU passes through both, and a failure is counted in `faults`.
+// `protect` is a generic function over `C: Cipher[e]`, as the Link Layer's code is.
+//
+//   novo test tests/ll_cipher_tests.nv
+
+use std.test
+use ll_cipher
+use ll_pdu
+use ll_phy
+
+// ── A cipher that is not one ─────────────────────────────────────────
+
+struct ToyCipher
+    var failed: Int
+    var sealed: Int
+    var opened: Int
+
+fn toy_cipher() -> ToyCipher
+    ToyCipher { failed: 0, sealed: 0, opened: 0 }
+
+// The octets of the header the nonce and the additional data bind: the mask of the kind of PDU the direction names.
+fn header_mask(dir: Int) -> Int
+    if (dir & ll_cipher.DIR_CIS) != 0
+        return 0xA3
+    if (dir & ll_cipher.DIR_BIS) != 0
+        return 0xC3
+    0xE3
+
+// The checksum of the sealed octets, four octets: the sum, the exclusive or, the masked header and the counter.
+fn checksum(var p: Pdu, ctr: Int, dir: Int, from: Int, to: Int, mic: Int) -> Int
+    var sum = 0
+    var x = 0
+    for i in from..to
+        sum = (sum + ll_pdu.pdu_get(var p, i)) & 0xFF
+        x = x ^ ll_pdu.pdu_get(var p, i)
+    let head = ll_pdu.pdu_get(var p, 0) & header_mask(dir)
+    match mic
+        0 => sum
+        1 => x
+        2 => head
+        _ => ctr & 0xFF
+
+fn shift(var p: Pdu, ek: EncKey, ctr: Int, from: Int, to: Int, sign: Int)
+    for i in from..to
+        let k = ek.sk[(i - from) % 16] as Int + ctr
+        p.b[i] = (p.b[i] as Int + sign * k) as u8
+
+impl Cipher[] for ToyCipher
+    fn seal(var self, var ek: EncKey, ctr: Int, dir: Int, var p: Pdu)
+        if p.n == 0
+            return
+        self.sealed = self.sealed + 1
+        let end = p.n
+        var mics: Vec[u8; 4] = Vec.new()
+        for m in 0..ll_cipher.MIC_OCTETS
+            let _a = mics.push(checksum(var p, ctr, dir, 2, end, m) as u8)
+        shift(var p, ek, ctr, 2, end, 1)
+        for m in 0..ll_cipher.MIC_OCTETS
+            let _ok = ll_pdu.pdu_put_data(var p, mics[m] as Int)
+        p.b[1] = (end - 2 + ll_cipher.MIC_OCTETS) as u8
+
+    fn open(var self, var ek: EncKey, ctr: Int, dir: Int, var p: Pdu) -> Bool
+        if p.n == 0
+            return true
+        self.opened = self.opened + 1
+        if p.n < 2 + ll_cipher.MIC_OCTETS
+            self.failed = self.failed + 1
+            return false
+        let end = p.n - ll_cipher.MIC_OCTETS
+        shift(var p, ek, ctr, 2, end, -1)
+        for m in 0..ll_cipher.MIC_OCTETS
+            if ll_pdu.pdu_get(var p, end + m) != checksum(var p, ctr, dir, 2, end, m)
+                self.failed = self.failed + 1
+                return false
+        p.n = end
+        p.b[1] = (end - 2) as u8
+        true
+
+    fn block(var self, var key: Vec[u8; 16], var blk: Vec[u8; 16]) -> Bool
+        var zero = true
+        for i in 0..16
+            if key[i] != 0
+                zero = false
+        if zero
+            self.failed = self.failed + 1
+            return false
+        for i in 0..16
+            blk[i] = blk[i] ^ key[i]
+        true
+
+    fn faults(var self) -> Int
+        self.failed
+
+// What the Link Layer does with the trait: seal a PDU, open it on the other side, and say whether it came back whole.
+fn protect<C: Cipher[e]>(var c: C, var ek: EncKey, ctr: Int, dir: Int, var p: Pdu) -> Bool [e]
+    c.seal(var ek, ctr, dir, var p)
+    c.open(var ek, ctr, dir, var p)
+
+fn key_of(first: Int) -> EncKey
+    var k = ll_cipher.enc_key_new()
+    for i in 0..16
+        k.sk[i] = (first + i) as u8
+    for i in 0..8
+        k.iv[i] = (0xA0 + i) as u8
+    k
+
+// A data PDU with the header octet `h` and the payload 1 to n.
+fn data_pdu(h: Int, n: Int) -> Pdu
+    var p = ll_pdu.pdu_new()
+    let _a = ll_pdu.pdu_put_data(var p, h)
+    let _b = ll_pdu.pdu_put_data(var p, n)
+    for i in 1..n + 1
+        let _c = ll_pdu.pdu_put_data(var p, i)
+    p
+
+// ── The key and the direction ────────────────────────────────────────
+
+@test
+fn test_a_new_session_key_holds_16_zero_octets_and_8_zero_octets_of_iv()
+    let k = ll_cipher.enc_key_new()
+    test.assert_eq(k.sk.len(), 16)
+    test.assert_eq(k.iv.len(), 8)
+    test.assert_eq(k.sk.capacity(), 16)
+    test.assert_eq(k.iv.capacity(), 8)
+    for i in 0..16
+        test.assert_eq(k.sk[i] as Int, 0)
+    for i in 0..8
+        test.assert_eq(k.iv[i] as Int, 0)
+
+@test
+fn test_the_key_is_a_value_that_two_holders_do_not_share()
+    var a = ll_cipher.enc_key_new()
+    var b = a
+    b.sk[0] = 9
+    test.assert_eq(a.sk[0] as Int, 0)
+    test.assert_eq(b.sk[0] as Int, 9)
+
+@test
+fn test_the_direction_bits_are_distinct_and_the_central_is_one()
+    test.assert_eq(ll_cipher.DIR_CENTRAL, 1)
+    test.assert_eq(ll_cipher.DIR_PERIPHERAL, 0)
+    test.assert_eq(ll_cipher.DIR_CIS, 2)
+    test.assert_eq(ll_cipher.DIR_BIS, 4)
+    test.assert_eq(ll_cipher.DIR_CENTRAL & ll_cipher.DIR_CIS, 0)
+    test.assert_eq(ll_cipher.DIR_CENTRAL & ll_cipher.DIR_BIS, 0)
+    test.assert_eq(ll_cipher.DIR_CIS & ll_cipher.DIR_BIS, 0)
+
+@test
+fn test_the_mic_is_four_octets_in_both_modules()
+    test.assert_eq(ll_cipher.MIC_OCTETS, 4)
+    test.assert_eq(ll_cipher.MIC_OCTETS, ll_phy.MIC_OCTETS)
+
+// ── The contract of Cipher ───────────────────────────────────────────
+
+@test
+fn test_seal_grows_the_pdu_by_the_mic_and_open_takes_it_off()
+    var c = toy_cipher()
+    var ek = key_of(1)
+    var p = data_pdu(0x02, 5)
+    var plain = data_pdu(0x02, 5)
+    c.seal(var ek, 7, ll_cipher.DIR_CENTRAL, var p)
+    test.assert_eq(p.n, plain.n + ll_cipher.MIC_OCTETS)
+    test.assert_eq(ll_pdu.pdu_len(var p), 5 + ll_cipher.MIC_OCTETS)
+    test.assert(ll_pdu.pdu_get(var p, 2) != ll_pdu.pdu_get(var plain, 2))
+    test.assert(c.open(var ek, 7, ll_cipher.DIR_CENTRAL, var p))
+    test.assert_eq(p.n, plain.n)
+    for i in 0..plain.n
+        test.assert_eq(ll_pdu.pdu_get(var p, i), ll_pdu.pdu_get(var plain, i))
+
+@test
+fn test_a_sealed_pdu_opens_with_the_key_the_counter_and_the_direction_it_was_sealed_with()
+    var c = toy_cipher()
+    var ek = key_of(1)
+    let cis = ll_cipher.DIR_CIS | ll_cipher.DIR_CENTRAL
+    let bis = ll_cipher.DIR_BIS | ll_cipher.DIR_CENTRAL
+    for dir in [ll_cipher.DIR_CENTRAL, ll_cipher.DIR_PERIPHERAL, cis, bis]
+        var p = data_pdu(0x01, 20)
+        test.assert(protect(var c, var ek, 3, dir, var p))
+        test.assert_eq(p.n, 22)
+    test.assert_eq(c.faults(), 0)
+    test.assert_eq(c.sealed, 4)
+    test.assert_eq(c.opened, 4)
+
+@test
+fn test_open_refuses_a_pdu_sealed_with_another_counter_or_key_or_payload()
+    var c = toy_cipher()
+    var ek = key_of(1)
+    var other = key_of(2)
+    var p = data_pdu(0x02, 8)
+    c.seal(var ek, 5, ll_cipher.DIR_CENTRAL, var p)
+    var wrong_ctr = p
+    test.assert(not c.open(var ek, 6, ll_cipher.DIR_CENTRAL, var wrong_ctr))
+    var wrong_key = p
+    test.assert(not c.open(var other, 5, ll_cipher.DIR_CENTRAL, var wrong_key))
+    var flipped = p
+    flipped.b[4] = flipped.b[4] ^ 1
+    test.assert(not c.open(var ek, 5, ll_cipher.DIR_CENTRAL, var flipped))
+    test.assert_eq(c.faults(), 3)
+    // The pdu itself still opens.
+    test.assert(c.open(var ek, 5, ll_cipher.DIR_CENTRAL, var p))
+
+@test
+fn test_the_header_bits_the_direction_masks_do_not_change_the_mic_and_the_others_do()
+    var c = toy_cipher()
+    var ek = key_of(1)
+    // A data PDU masks NESN, SN and MD (0xE3 keeps the rest): bits 2, 3 and 4 are not bound.
+    var p = data_pdu(0x01, 4)
+    c.seal(var ek, 1, ll_cipher.DIR_CENTRAL, var p)
+    var nesn = p
+    nesn.b[0] = nesn.b[0] ^ 0x04
+    test.assert(c.open(var ek, 1, ll_cipher.DIR_CENTRAL, var nesn))
+    var llid = p
+    llid.b[0] = llid.b[0] ^ 0x01
+    test.assert(not c.open(var ek, 1, ll_cipher.DIR_CENTRAL, var llid))
+    // A Connected Isochronous PDU binds a different set of bits (0xA3), a Broadcast one another (0xC3).
+    var q = data_pdu(0x40, 4)
+    c.seal(var ek, 1, ll_cipher.DIR_CIS | ll_cipher.DIR_CENTRAL, var q)
+    var cie = q
+    cie.b[0] = cie.b[0] ^ 0x04
+    test.assert(c.open(var ek, 1, ll_cipher.DIR_CIS | ll_cipher.DIR_CENTRAL, var cie))
+    var r = data_pdu(0x40, 4)
+    c.seal(var ek, 1, ll_cipher.DIR_BIS | ll_cipher.DIR_CENTRAL, var r)
+    var flag = r
+    flag.b[0] = flag.b[0] ^ 0x08
+    test.assert(c.open(var ek, 1, ll_cipher.DIR_BIS | ll_cipher.DIR_CENTRAL, var flag))
+    var bit7 = r
+    bit7.b[0] = bit7.b[0] ^ 0x40
+    test.assert(not c.open(var ek, 1, ll_cipher.DIR_BIS | ll_cipher.DIR_CENTRAL, var bit7))
+
+@test
+fn test_an_empty_pdu_is_left_as_it_is_by_seal_and_open()
+    var c = toy_cipher()
+    var ek = key_of(1)
+    var p = ll_pdu.pdu_new()
+    c.seal(var ek, 1, ll_cipher.DIR_CENTRAL, var p)
+    test.assert_eq(p.n, 0)
+    test.assert(c.open(var ek, 1, ll_cipher.DIR_CENTRAL, var p))
+    test.assert_eq(p.n, 0)
+    test.assert_eq(c.sealed, 0)
+    test.assert_eq(c.faults(), 0)
+
+@test
+fn test_a_payload_shorter_than_a_mic_does_not_open()
+    var c = toy_cipher()
+    var ek = key_of(1)
+    var p = data_pdu(0x02, 1)
+    test.assert_eq(p.n, 3)
+    test.assert(not c.open(var ek, 1, ll_cipher.DIR_CENTRAL, var p))
+    test.assert_eq(c.faults(), 1)
+
+@test
+fn test_block_encrypts_in_place_and_counts_an_engine_that_failed()
+    var c = toy_cipher()
+    var key: Vec[u8; 16] = Vec.new()
+    var blk: Vec[u8; 16] = Vec.new()
+    for i in 0..16
+        let _a = key.push((i + 1) as u8)
+        let _b = blk.push(0xFF)
+    test.assert(c.block(var key, var blk))
+    test.assert_eq(blk[0] as Int, 0xFE)
+    test.assert_eq(blk[15] as Int, 0xEF)
+    test.assert_eq(c.faults(), 0)
+    // An engine given no key fails, and says so.
+    var none: Vec[u8; 16] = Vec.new()
+    for _ in 0..16
+        let _z = none.push(0)
+    test.assert(not c.block(var none, var blk))
+    test.assert_eq(c.faults(), 1)
+    test.assert(not c.block(var none, var blk))
+    test.assert_eq(c.faults(), 2)
