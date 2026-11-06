@@ -198,7 +198,7 @@ struct CsStep
 //   tx_dbm          the transmit power
 //   snr_i, snr_r    the transmit power control of each side for the SNR
 //   window_us       how far the start of the first step may shift, from the clock accuracies
-//   test            the overrides of LE CS Test, 0 for a procedure of the Link Layer
+//   test            0 for a procedure of the Link Layer, 1 for an LE CS Test (the overrides the Controller takes are part of the plan, and it refuses the others)
 pub @value
 struct CsPlan
     role: u8
