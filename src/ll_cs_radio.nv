@@ -1,0 +1,386 @@
+// orbit/noble-radio/src/ll_cs_radio.nv — the seam between the Link Layer's Channel Sounding procedures and a radio that measures:
+// what a chip reports of itself, what the Link Layer hands it to run, and what it hands back.
+//
+// Channel Sounding ([Vol 1] Part A, Section 9; [Vol 6] Part H) lets two connected devices measure the channel between them.  A
+// procedure holds events, an event holds subevents and a subevent holds steps, each step an exchange on one RF channel in one of four
+// modes: mode 0 measures the frequency offset of the peer, mode 1 the round-trip time, mode 2 the phase and amplitude of a tone, mode 3
+// the round-trip time and a tone together.  The Link Layer decides everything a subevent holds (the channels, the access addresses, the
+// sequences, the step times) and the radio carries it out and measures.
+//
+// The unit of the seam is the subevent.  A step lasts 75 microseconds at the shortest and the transmissions of a subevent keep a timing of
+// plus or minus 1 microsecond, so a plan of steps goes in (`cs_arm`), the radio runs it (`cs_run`) and the raw measurements come back in a
+// `CsRaw`.  Whether the radio sequences the steps in hardware or in software with hardware timers stays in the backend.
+//
+// A chip without Channel Sounding implements `CsRadio` with its header alone: every method has a body that answers that there is none,
+// and a Controller built over such a radio reports no Channel Sounding to the Host.  The trait is separate from `Radio` so that a port
+// that has no Channel Sounding writes no method of it.
+//
+// No function here allocates.
+
+// What `cs_arm` and `cs_run` answer: the plan ran or was loaded.
+pub const CS_OK = 0
+// The radio has no Channel Sounding, or not the plan it was given.
+pub const CS_UNSUPPORTED = 1
+// The time given to `cs_arm` is nearer than `CsTiming.arm_lead_us`.
+pub const CS_LATE = 2
+// The plan holds more steps than the radio takes.
+pub const CS_RESOURCES = 3
+// `cs_abort`, or a fault, ended the run before the last step.
+pub const CS_ABORTED = 4
+
+// The roles of a plan, and the bits of `CsCaps.roles` that name them ([Vol 4] Part E, Section 7.8.130, Roles_Supported).  The initiator
+// transmits first in every step.
+pub const CS_ROLE_INITIATOR = 0
+pub const CS_ROLE_REFLECTOR = 1
+pub const CS_ROLES_INITIATOR = 1
+pub const CS_ROLES_REFLECTOR = 2
+
+// The most steps a subevent holds ([Vol 6] Part B, Section 4.5.18.1), and the most tone slots of a step: the antenna paths, at most 4, and
+// the tone extension slot.
+pub const CS_STEPS_MAX = 160
+pub const CS_TONES_MAX = 5
+
+// The most steps, subevents and bits of a sequence a procedure holds.
+pub const CS_SUBEVENTS_MAX = 32
+pub const CS_PROCEDURE_STEPS_MAX = 256
+pub const CS_SEQ_BITS_MAX = 128
+
+// The mode of a step.
+pub const CS_MODE_0 = 0
+pub const CS_MODE_1 = 1
+pub const CS_MODE_2 = 2
+pub const CS_MODE_3 = 3
+
+// What a field says when the radio did not measure it: the value the HCI events carry for a time or a frequency offset that is not
+// available ([Vol 4] Part E, Section 7.7.65.44), and the tone quality of an empty measurement.
+pub const CS_TIME_UNAVAILABLE = 0x8000
+pub const CS_FREQ_UNAVAILABLE = 0xC000
+pub const CS_TONE_QUALITY_UNAVAILABLE = 3
+
+// ── What a radio reports of itself ───────────────────────────────────
+
+// What the radio can do, read once when the Controller starts.  The fields mirror the capability record of LE CS Read Local Supported
+// Capabilities ([Vol 4] Part E, Section 7.8.130) so that the answer to the Host is a copy of it, cut down by what the Controller's build
+// leaves out.
+//
+//   supported       whether the radio takes part in Channel Sounding at all
+//   roles           bit 0 initiator, bit 1 reflector
+//   modes           bit 0 mode 3
+//   rtt_types       one bit for each RTT_Type, 0 to 6
+//   phys            bit 0 LE 1M, bit 1 LE 2M, bit 2 LE 2M 2BT (the HCI record leaves LE 1M implicit)
+//   ant_elements    antenna elements the radio switches between, 1 to 4
+//   max_paths       antenna paths of a step, 1 to 4
+//   t_ip1, t_ip2, t_fcs, t_pm   the optional step timings, as masks in the HCI bit order; the mandatory values (T_IP 145, T_FCS 150
+//                   and T_PM 40 microseconds) have no bit and always run
+//   t_sw_us, t_sw_ipt_us   the antenna switch time: 0, 1, 2, 4 or 10 microseconds
+//   t_ip2_ipt       the optional T_IP2 timings of a step with an initiator phase tone
+//   snr_mask        the transmit power control steps for the SNR of the peer
+//   no_fae          the radio needs no table of frequency actuation errors
+//   ch3c            Channel Selection Algorithm #3c
+//   sounding_pct    the phase measurement of a sounding sequence
+//   ipt             the initiator phase tone of Enhancement #1
+//   rtt_per_phy     the round-trip time counts differ for LE 2M
+//   tq              the tone quality indication, LE feature 48
+//   nadm_sound, nadm_rand   the attack detector metric of the sounding and random sequences
+//   rtt_cap         the accuracy class of the round-trip time, 10 or 150 nanoseconds
+//   n_aa, n_sound, n_rand           the exchanges of the round-trip time per type on LE 1M
+//   n_2m_aa, n_2m_sound, n_2m_rand  the same on LE 2M
+pub @value
+struct CsCaps
+    supported: Bool
+    roles: Int
+    modes: Int
+    rtt_types: Int
+    phys: Int
+    ant_elements: Int
+    max_paths: Int
+    t_ip1: Int
+    t_ip2: Int
+    t_fcs: Int
+    t_pm: Int
+    t_sw_us: Int
+    t_sw_ipt_us: Int
+    t_ip2_ipt: Int
+    snr_mask: Int
+    no_fae: Bool
+    ch3c: Bool
+    sounding_pct: Bool
+    ipt: Bool
+    rtt_per_phy: Bool
+    tq: Bool
+    nadm_sound: Int
+    nadm_rand: Int
+    rtt_cap: Int
+    n_aa: Int
+    n_sound: Int
+    n_rand: Int
+    n_2m_aa: Int
+    n_2m_sound: Int
+    n_2m_rand: Int
+
+// The numbers the arbiter and the Link Layer budget a subevent with, read once.
+//
+//   arm_lead_us     the least time between `cs_arm` and the start of the run
+//   rx_window_us    how much before the start a reflector's receiver must be open
+//   turn_us         the least idle time the backend needs between two runs, beside the minimum subevent space
+//   finish_us       the time from the end of the last step to readable results
+//   max_steps       the most steps a plan may hold, at most 160
+//   max_run_us      the longest run, which bounds the Subevent_Len the Controller proposes
+pub @value
+struct CsTiming
+    arm_lead_us: Int
+    rx_window_us: Int
+    turn_us: Int
+    finish_us: Int
+    max_steps: Int
+    max_run_us: Int
+
+// The delays between the point a timestamp is taken and the antenna port, in picoseconds, for CS_SYNC on each PHY and for the middle of
+// a tone window, and the distance offset of the board in centimetres (applied to the phase of a tone only).  A port reports zero for a
+// delay it has not measured.
+pub @value
+struct CsCal
+    tx_1m_ps: Int
+    tx_2m_ps: Int
+    tx_2bt_ps: Int
+    rx_1m_ps: Int
+    rx_2m_ps: Int
+    rx_2bt_ps: Int
+    tone_ps: Int
+    distance_offset_cm: Int
+
+// ── What the Link Layer hands the radio ──────────────────────────────
+
+// One step of a plan.
+//
+//   mode            0 to 3
+//   ch              the CS channel index, 2 to 22 or 26 to 76
+//   ext_i, ext_r    whether the tone extension slot after the tones of the initiator, of the reflector, carries a tone
+//   perm            the antenna path permutation index
+//   aa_i, aa_r      the CS access address of each direction
+//   seq_bits        the length of the sequences, 0 for none, otherwise 32, 64, 96 or 128
+//   seq_i, seq_r    the sequence of each direction, 128 bits as two words each, the first word the first 64 bits sent
+//   start_ns, len_ns   where the step begins and how long it lasts, from the origin of the subevent
+pub @value
+struct CsStep
+    mode: u8
+    ch: u8
+    ext_i: Bool
+    ext_r: Bool
+    perm: u8
+    seq_bits: u8
+    aa_i: u32
+    aa_r: u32
+    seq_i0: Int
+    seq_i1: Int
+    seq_r0: Int
+    seq_r1: Int
+    start_ns: u32
+    len_ns: u32
+
+// A plan: the head, which says how the steps run, and the steps.
+//
+//   role            `CS_ROLE_INITIATOR` or `CS_ROLE_REFLECTOR`
+//   phy             the CS_SYNC PHY as the HCI names it: 1 LE 1M, 2 LE 2M, 3 LE 2M 2BT
+//   rtt             the RTT_Type, 0 to 6
+//   n_steps         steps in `steps`
+//   n_mode0         the mode 0 steps among them
+//   t_ip1_us, t_ip2_us, t_fcs_us, t_pm_us, t_sw_us   the step timings in microseconds
+//   ipt             the initiator phase tone of Enhancement #1
+//   n_ap            antenna paths less one, 0 to 3
+//   aci             the antenna configuration index
+//   tx_dbm          the transmit power
+//   snr_i, snr_r    the transmit power control of each side for the SNR
+//   window_us       how far the start of the first step may shift, from the clock accuracies
+//   test            the overrides of LE CS Test, 0 for a procedure of the Link Layer
+pub @value
+struct CsPlan
+    role: u8
+    phy: u8
+    rtt: u8
+    n_steps: u8
+    n_mode0: u8
+    t_ip1_us: u8
+    t_ip2_us: u8
+    t_fcs_us: u8
+    t_pm_us: u8
+    t_sw_us: u8
+    ipt: Bool
+    n_ap: u8
+    aci: u8
+    tx_dbm: i8
+    snr_i: u8
+    snr_r: u8
+    window_us: u32
+    test: u32
+    steps: Vec[CsStep; CS_STEPS_MAX]
+
+// ── What the radio hands back ────────────────────────────────────────
+
+// One tone slot of a step: the phase correction term of the tone, I and Q of 12 bits each, its tone quality (bits 0 to 3: 0 high, 1
+// medium, 2 low, 3 not available) and whether the slot carried a tone.
+pub @value
+struct CsTone
+    i: i16
+    q: i16
+    tq: u8
+    present: Bool
+
+// The measurements of one step.
+//
+//   done            whether the step ran
+//   aa_q            the access address found: 0 correct, 1 with bit errors, 2 not found
+//   bit_errors      the bit errors of a sequence, 15 for 15 or more
+//   rssi_dbm        the signal strength of CS_SYNC
+//   ant             the antenna element CS_SYNC used
+//   toa_ps, tod_ps  the time of arrival and of departure of CS_SYNC from the origin of the subevent, in picoseconds, with whether each was taken
+//   ffo             the frequency offset of the peer in 0.01 ppm (mode 0, initiator), 0xC000 when not measured
+//   pct1, pct2      the phase correction terms of a sounding sequence, 24 bits each
+//   tones           the tone slots, `n_ap + 1` of them and the extension slot
+pub @value
+struct CsStepRaw
+    done: Bool
+    aa_q: u8
+    bit_errors: u8
+    rssi_dbm: i8
+    ant: u8
+    toa_valid: Bool
+    tod_valid: Bool
+    ffo: u16
+    pct1: u32
+    pct2: u32
+    toa_ps: Int
+    tod_ps: Int
+    tones: Vec[CsTone; CS_TONES_MAX]
+
+// The raw result of a run.
+//
+//   status          `CS_OK`, `CS_ABORTED` or the reason a run did not start
+//   n_done          the steps that ran
+//   abort           the subevent abort reason of [Vol 6] Part B, Section 4.5.18.1: 0 none, 1 Host or remote request, 2 no CS_SYNC received in
+//                   mode 0, 3 scheduling conflict or limited resources, 0xF other
+//   ffo             the Frequency_Compensation the initiator applied, 0.01 ppm
+//   rpl_dbm         the reference power level, the power of a phase correction term of amplitude 2048
+//   t_ref_us        the instant taken as the origin, on the Timebase
+//   steps           the measurements of each step
+pub @value
+struct CsRaw
+    status: u8
+    n_done: u8
+    abort: u8
+    ffo: u16
+    rpl_dbm: i8
+    t_ref_us: Int
+    steps: Vec[CsStepRaw; CS_STEPS_MAX]
+
+// ── The records of a radio that has none ─────────────────────────────
+
+// The capabilities of a radio without Channel Sounding: nothing supported, every count zero.
+pub @tier(embedded)
+@no_alloc
+fn cs_caps_none() -> CsCaps
+    CsCaps { supported: false, roles: 0, modes: 0, rtt_types: 0, phys: 0, ant_elements: 0, max_paths: 0, t_ip1: 0, t_ip2: 0, t_fcs: 0,
+             t_pm: 0, t_sw_us: 0, t_sw_ipt_us: 0, t_ip2_ipt: 0, snr_mask: 0, no_fae: false, ch3c: false, sounding_pct: false, ipt: false,
+             rtt_per_phy: false, tq: false, nadm_sound: 0, nadm_rand: 0, rtt_cap: 0, n_aa: 0, n_sound: 0, n_rand: 0, n_2m_aa: 0,
+             n_2m_sound: 0, n_2m_rand: 0 }
+
+// The timing of a radio without Channel Sounding: no step fits and no run is allowed.
+pub @tier(embedded)
+@no_alloc
+fn cs_timing_none() -> CsTiming
+    CsTiming { arm_lead_us: 0,
+        rx_window_us: 0,
+        turn_us: 0,
+        finish_us: 0,
+        max_steps: 0,
+        max_run_us: 0 }
+
+// The calibration of a radio that has measured nothing: every delay zero.
+pub @tier(embedded)
+@no_alloc
+fn cs_cal_none() -> CsCal
+    CsCal { tx_1m_ps: 0,
+        tx_2m_ps: 0,
+        tx_2bt_ps: 0,
+        rx_1m_ps: 0,
+        rx_2m_ps: 0,
+        rx_2bt_ps: 0,
+        tone_ps: 0,
+        distance_offset_cm: 0 }
+
+// A step with nothing in it: mode 0 on channel 2, no tone extension, no sequence, no time.
+pub @tier(embedded)
+@no_alloc
+fn cs_step_new() -> CsStep
+    CsStep { mode: 0, ch: 2, ext_i: false, ext_r: false, perm: 0, seq_bits: 0, aa_i: 0, aa_r: 0, seq_i0: 0, seq_i1: 0, seq_r0: 0,
+             seq_r1: 0, start_ns: 0, len_ns: 0 }
+
+// A plan with no steps, for an initiator on LE 1M with the mandatory timings (T_IP 145, T_FCS 150 and T_PM 40 microseconds) and no
+// antenna switching.
+pub @tier(embedded)
+@no_alloc
+fn cs_plan_new() -> CsPlan
+    CsPlan { role: 0, phy: 1, rtt: 0, n_steps: 0, n_mode0: 0, t_ip1_us: 145, t_ip2_us: 145, t_fcs_us: 150, t_pm_us: 40, t_sw_us: 0,
+             ipt: false, n_ap: 0, aci: 0, tx_dbm: 0, snr_i: 0, snr_r: 0, window_us: 0, test: 0, steps: Vec.new() }
+
+// A tone slot with no tone: I and Q zero and a tone quality of not available.
+pub @tier(embedded)
+@no_alloc
+fn cs_tone_none() -> CsTone
+    CsTone { i: 0, q: 0, tq: CS_TONE_QUALITY_UNAVAILABLE, present: false }
+
+// The measurements of a step that did not run.
+pub @tier(embedded)
+@no_alloc
+fn cs_step_raw_none() -> CsStepRaw
+    CsStepRaw { done: false, aa_q: 2, bit_errors: 0, rssi_dbm: 0, ant: 0, toa_valid: false, tod_valid: false, ffo: CS_FREQ_UNAVAILABLE,
+                pct1: 0, pct2: 0, toa_ps: 0, tod_ps: 0, tones: Vec.new() }
+
+// The raw result of a run that did not happen: aborted with no step done.
+pub @tier(embedded)
+@no_alloc
+fn cs_raw_new() -> CsRaw
+    CsRaw { status: CS_ABORTED,
+        n_done: 0,
+        abort: 0,
+        ffo: CS_FREQ_UNAVAILABLE,
+        rpl_dbm: 0,
+        t_ref_us: 0,
+        steps: Vec.new() }
+
+// ── The trait ────────────────────────────────────────────────────────
+
+// What the Link Layer asks of a radio that measures.  Every method has a body that answers "none", so a radio without Channel Sounding
+// writes `impl CsRadio[] for X` over a header alone.  The effect `s` is the backend's, as `Radio[e]`'s.
+pub trait CsRadio[s]
+    // Whether the radio takes part in a Channel Sounding procedure at all.
+    fn supports_cs(var self) -> Bool [s]
+        false
+
+    // What the radio can do, asked once when the Controller starts.
+    fn cs_caps(var self) -> CsCaps [s]
+        ll_cs_radio.cs_caps_none()
+
+    // The numbers the arbiter and the Link Layer budget a subevent with, asked once.
+    fn cs_timing(var self) -> CsTiming [s]
+        ll_cs_radio.cs_timing_none()
+
+    // The delays between the instant a timestamp is taken and the antenna port, asked once.
+    fn cs_cal(var self) -> CsCal [s]
+        ll_cs_radio.cs_cal_none()
+
+    // The frequency actuation error of the radio on the CS channel `ch` (2 to 76), measured in mode 0, in units of 1/32 ppm.
+    fn cs_fae(var self, ch: Int) -> Int [s]
+        0
+
+    // Load `plan`; the run starts at `t0_us` on the Timebase.  `CS_OK`, `CS_UNSUPPORTED`, `CS_LATE` or `CS_RESOURCES`.
+    fn cs_arm(var self, var plan: CsPlan, t0_us: Int) -> Int [s]
+        CS_UNSUPPORTED
+
+    // Run the loaded plan to its last step, and fill `raw`.  Blocks until the run has ended.  `CS_OK`, `CS_ABORTED` or `CS_UNSUPPORTED`.
+    fn cs_run(var self, var raw: CsRaw) -> Int [s]
+        CS_UNSUPPORTED
+
+    // Take the radio to rest at once, from another context than the run's.
+    fn cs_abort(var self) [s]
+        pass

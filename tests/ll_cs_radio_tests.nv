@@ -1,0 +1,381 @@
+// tests/ll_cs_radio_tests.nv — the unit tests of src/ll_cs_radio.nv: the constants, the records of a radio without Channel Sounding, the
+// defaults of `CsRadio` as a header-only impl keeps them, and the contract as a small radio that overrides every method keeps it.
+//
+// `NoCs` is a port with no Channel Sounding: its impl is the header alone.  `FakeCs` is a radio with registers of no chip: it reports a
+// reflector that runs mode 0 and mode 1 steps, loads a plan, and answers `CS_LATE` for a start nearer than its lead.  `run_one` is a
+// generic function in the shape of the Link Layer's use of the trait: it is written over `R: CsRadio[s]` and sees only the trait.
+//
+//   novo test tests/ll_cs_radio_tests.nv
+
+use std.test
+use ll_cs_radio
+
+// ── A port without Channel Sounding ──────────────────────────────────
+
+struct NoCs
+    var unused: Int
+
+impl CsRadio[] for NoCs
+
+// ── A radio that has some ────────────────────────────────────────────
+
+struct FakeCs
+    var armed: Bool
+    var steps: Int
+    var aborted: Int
+    var lead: Int
+    var fault: Bool
+
+fn fake_cs() -> FakeCs
+    FakeCs { armed: false, steps: 0, aborted: 0, lead: 500, fault: false }
+
+// The fields a `@value` record takes are written through a `var` parameter, as the Link Layer's own helpers do.
+fn fill_caps(var c: CsCaps)
+    c.supported = true
+    c.roles = ll_cs_radio.CS_ROLES_REFLECTOR
+    c.phys = 3
+    c.ant_elements = 1
+    c.max_paths = 1
+    c.n_aa = 255
+    c.rtt_cap = 1
+
+fn fill_timing(var t: CsTiming, lead: Int)
+    t.arm_lead_us = lead
+    t.max_steps = 32
+    t.max_run_us = 5000
+
+fn fill_cal(var k: CsCal)
+    k.tx_1m_ps = 1500
+
+fn put_steps(var p: CsPlan, n: Int)
+    p.n_steps = n as u8
+
+fn fill_step(var s: CsStep)
+    s.mode = 2
+    s.ch = 76
+    s.aa_i = 0xDEADBEEF
+    s.seq_bits = 128
+    s.seq_r1 = 0x0123456789ABCDEF
+    s.start_ns = 4_000_000_000
+    s.len_ns = 705_000
+
+fn fill_step_raw(var s: CsStepRaw)
+    s.done = true
+    s.toa_valid = true
+    s.toa_ps = -123_456_789
+
+impl CsRadio[] for FakeCs
+    fn supports_cs(var self) -> Bool
+        true
+
+    fn cs_caps(var self) -> CsCaps
+        var c = ll_cs_radio.cs_caps_none()
+        fill_caps(var c)
+        c
+
+    fn cs_timing(var self) -> CsTiming
+        var t = ll_cs_radio.cs_timing_none()
+        fill_timing(var t, self.lead)
+        t
+
+    fn cs_cal(var self) -> CsCal
+        var k = ll_cs_radio.cs_cal_none()
+        fill_cal(var k)
+        k
+
+    fn cs_fae(var self, ch: Int) -> Int
+        ch - 40
+
+    fn cs_arm(var self, var plan: CsPlan, t0_us: Int) -> Int
+        if t0_us < self.lead
+            return ll_cs_radio.CS_LATE
+        if (plan.n_steps as Int) > 32
+            return ll_cs_radio.CS_RESOURCES
+        self.armed = true
+        self.steps = plan.n_steps as Int
+        ll_cs_radio.CS_OK
+
+    fn cs_run(var self, var raw: CsRaw) -> Int
+        if not self.armed
+            return ll_cs_radio.CS_UNSUPPORTED
+        self.armed = false
+        if self.fault
+            return ll_cs_radio.CS_ABORTED
+        raw.n_done = self.steps as u8
+        raw.status = ll_cs_radio.CS_OK as u8
+        ll_cs_radio.CS_OK
+
+    fn cs_abort(var self)
+        self.aborted = self.aborted + 1
+        self.armed = false
+
+// Load a plan of `n` steps at `t0_us` and run it; the status of the first call that did not succeed, or the number of steps that ran.
+fn run_one<R: CsRadio[s]>(var r: R, n: Int, t0_us: Int) -> Int [s]
+    var plan = ll_cs_radio.cs_plan_new()
+    put_steps(var plan, n)
+    let a = r.cs_arm(var plan, t0_us)
+    if a != ll_cs_radio.CS_OK
+        return a
+    var raw = ll_cs_radio.cs_raw_new()
+    let s = r.cs_run(var raw)
+    if s != ll_cs_radio.CS_OK
+        return s
+    raw.n_done as Int
+
+// ── The constants ────────────────────────────────────────────────────
+
+@test
+fn test_the_answers_of_the_methods_are_distinct()
+    test.assert_eq(ll_cs_radio.CS_OK, 0)
+    test.assert_eq(ll_cs_radio.CS_UNSUPPORTED, 1)
+    test.assert_eq(ll_cs_radio.CS_LATE, 2)
+    test.assert_eq(ll_cs_radio.CS_RESOURCES, 3)
+    test.assert_eq(ll_cs_radio.CS_ABORTED, 4)
+
+@test
+fn test_the_roles_are_the_values_of_a_plan_and_the_bits_of_the_capabilities()
+    test.assert_eq(ll_cs_radio.CS_ROLE_INITIATOR, 0)
+    test.assert_eq(ll_cs_radio.CS_ROLE_REFLECTOR, 1)
+    test.assert_eq(ll_cs_radio.CS_ROLES_INITIATOR, 1)
+    test.assert_eq(ll_cs_radio.CS_ROLES_REFLECTOR, 2)
+    test.assert_eq(ll_cs_radio.CS_ROLES_INITIATOR & ll_cs_radio.CS_ROLES_REFLECTOR, 0)
+
+@test
+fn test_the_limits_of_a_procedure_are_the_ones_of_the_specification()
+    test.assert_eq(ll_cs_radio.CS_STEPS_MAX, 160)
+    test.assert_eq(ll_cs_radio.CS_TONES_MAX, 5)
+    test.assert_eq(ll_cs_radio.CS_SUBEVENTS_MAX, 32)
+    test.assert_eq(ll_cs_radio.CS_PROCEDURE_STEPS_MAX, 256)
+    test.assert_eq(ll_cs_radio.CS_SEQ_BITS_MAX, 128)
+
+@test
+fn test_the_modes_run_from_0_to_3()
+    test.assert_eq(ll_cs_radio.CS_MODE_0, 0)
+    test.assert_eq(ll_cs_radio.CS_MODE_1, 1)
+    test.assert_eq(ll_cs_radio.CS_MODE_2, 2)
+    test.assert_eq(ll_cs_radio.CS_MODE_3, 3)
+
+@test
+fn test_the_values_of_a_field_that_was_not_measured_are_the_ones_the_events_carry()
+    test.assert_eq(ll_cs_radio.CS_TIME_UNAVAILABLE, 0x8000)
+    test.assert_eq(ll_cs_radio.CS_FREQ_UNAVAILABLE, 0xC000)
+    test.assert_eq(ll_cs_radio.CS_TONE_QUALITY_UNAVAILABLE, 3)
+
+// ── The records of a radio without Channel Sounding ──────────────────
+
+@test
+fn test_the_capabilities_of_a_radio_without_the_feature_are_all_zero()
+    let c = ll_cs_radio.cs_caps_none()
+    test.assert(not c.supported)
+    test.assert_eq(c.roles, 0)
+    test.assert_eq(c.modes, 0)
+    test.assert_eq(c.rtt_types, 0)
+    test.assert_eq(c.phys, 0)
+    test.assert_eq(c.ant_elements, 0)
+    test.assert_eq(c.max_paths, 0)
+    test.assert_eq(c.t_ip1 + c.t_ip2 + c.t_fcs + c.t_pm, 0)
+    test.assert_eq(c.t_sw_us + c.t_sw_ipt_us + c.t_ip2_ipt + c.snr_mask, 0)
+    test.assert(not c.no_fae)
+    test.assert(not c.ch3c)
+    test.assert(not c.sounding_pct)
+    test.assert(not c.ipt)
+    test.assert(not c.rtt_per_phy)
+    test.assert(not c.tq)
+    test.assert_eq(c.nadm_sound + c.nadm_rand + c.rtt_cap, 0)
+    test.assert_eq(c.n_aa + c.n_sound + c.n_rand, 0)
+    test.assert_eq(c.n_2m_aa + c.n_2m_sound + c.n_2m_rand, 0)
+
+@test
+fn test_the_timing_of_a_radio_without_the_feature_allows_no_step_and_no_run()
+    let t = ll_cs_radio.cs_timing_none()
+    test.assert_eq(t.arm_lead_us, 0)
+    test.assert_eq(t.rx_window_us, 0)
+    test.assert_eq(t.turn_us, 0)
+    test.assert_eq(t.finish_us, 0)
+    test.assert_eq(t.max_steps, 0)
+    test.assert_eq(t.max_run_us, 0)
+
+@test
+fn test_the_calibration_of_a_radio_that_measured_nothing_is_all_zero()
+    let k = ll_cs_radio.cs_cal_none()
+    test.assert_eq(k.tx_1m_ps + k.tx_2m_ps + k.tx_2bt_ps, 0)
+    test.assert_eq(k.rx_1m_ps + k.rx_2m_ps + k.rx_2bt_ps, 0)
+    test.assert_eq(k.tone_ps, 0)
+    test.assert_eq(k.distance_offset_cm, 0)
+
+@test
+fn test_a_new_step_is_empty()
+    let s = ll_cs_radio.cs_step_new()
+    test.assert_eq(s.mode as Int, 0)
+    test.assert_eq(s.ch as Int, 2)
+    test.assert(not s.ext_i)
+    test.assert(not s.ext_r)
+    test.assert_eq(s.perm as Int, 0)
+    test.assert_eq(s.seq_bits as Int, 0)
+    test.assert_eq(s.aa_i as Int, 0)
+    test.assert_eq(s.aa_r as Int, 0)
+    test.assert_eq(s.seq_i0 + s.seq_i1 + s.seq_r0 + s.seq_r1, 0)
+    test.assert_eq(s.start_ns as Int, 0)
+    test.assert_eq(s.len_ns as Int, 0)
+
+@test
+fn test_a_new_plan_is_an_initiator_on_le_1m_with_the_mandatory_timings_and_no_steps()
+    let p = ll_cs_radio.cs_plan_new()
+    test.assert_eq(p.role as Int, ll_cs_radio.CS_ROLE_INITIATOR)
+    test.assert_eq(p.phy as Int, 1)
+    test.assert_eq(p.rtt as Int, 0)
+    test.assert_eq(p.n_steps as Int, 0)
+    test.assert_eq(p.n_mode0 as Int, 0)
+    test.assert_eq(p.t_ip1_us as Int, 145)
+    test.assert_eq(p.t_ip2_us as Int, 145)
+    test.assert_eq(p.t_fcs_us as Int, 150)
+    test.assert_eq(p.t_pm_us as Int, 40)
+    test.assert_eq(p.t_sw_us as Int, 0)
+    test.assert(not p.ipt)
+    test.assert_eq(p.n_ap as Int, 0)
+    test.assert_eq(p.aci as Int, 0)
+    test.assert_eq(p.tx_dbm as Int, 0)
+    test.assert_eq(p.snr_i as Int + p.snr_r as Int, 0)
+    test.assert_eq(p.window_us as Int, 0)
+    test.assert_eq(p.test as Int, 0)
+    test.assert_eq(p.steps.len(), 0)
+    test.assert_eq(p.steps.capacity(), ll_cs_radio.CS_STEPS_MAX)
+
+@test
+fn test_a_plan_holds_its_steps()
+    var p = ll_cs_radio.cs_plan_new()
+    var s = ll_cs_radio.cs_step_new()
+    fill_step(var s)
+    let _a = p.steps.push(s)
+    test.assert_eq(p.steps.len(), 1)
+    test.assert_eq(p.steps[0].mode as Int, 2)
+    test.assert_eq(p.steps[0].ch as Int, 76)
+    test.assert_eq(p.steps[0].aa_i as Int, 0xDEADBEEF)
+    test.assert_eq(p.steps[0].seq_bits as Int, 128)
+    test.assert_eq(p.steps[0].seq_r1, 0x0123456789ABCDEF)
+    test.assert_eq(p.steps[0].start_ns as Int, 4_000_000_000)
+    test.assert_eq(p.steps[0].len_ns as Int, 705_000)
+
+@test
+fn test_a_tone_slot_with_no_tone_has_zero_i_and_q_and_a_quality_of_not_available()
+    let t = ll_cs_radio.cs_tone_none()
+    test.assert_eq(t.i as Int, 0)
+    test.assert_eq(t.q as Int, 0)
+    test.assert_eq(t.tq as Int, 3)
+    test.assert(not t.present)
+
+@test
+fn test_the_measurements_of_a_step_that_did_not_run_say_so()
+    let r = ll_cs_radio.cs_step_raw_none()
+    test.assert(not r.done)
+    test.assert_eq(r.aa_q as Int, 2)
+    test.assert_eq(r.bit_errors as Int, 0)
+    test.assert(not r.toa_valid)
+    test.assert(not r.tod_valid)
+    test.assert_eq(r.ffo as Int, 0xC000)
+    test.assert_eq(r.pct1 as Int + r.pct2 as Int, 0)
+    test.assert_eq(r.toa_ps + r.tod_ps, 0)
+    test.assert_eq(r.tones.len(), 0)
+    test.assert_eq(r.tones.capacity(), ll_cs_radio.CS_TONES_MAX)
+
+@test
+fn test_a_new_raw_result_is_an_aborted_run_with_no_step_done()
+    let r = ll_cs_radio.cs_raw_new()
+    test.assert_eq(r.status as Int, ll_cs_radio.CS_ABORTED)
+    test.assert_eq(r.n_done as Int, 0)
+    test.assert_eq(r.abort as Int, 0)
+    test.assert_eq(r.ffo as Int, 0xC000)
+    test.assert_eq(r.rpl_dbm as Int, 0)
+    test.assert_eq(r.t_ref_us, 0)
+    test.assert_eq(r.steps.len(), 0)
+    test.assert_eq(r.steps.capacity(), ll_cs_radio.CS_STEPS_MAX)
+
+@test
+fn test_a_raw_result_holds_the_measurements_of_a_step_and_its_tones()
+    var r = ll_cs_radio.cs_raw_new()
+    var s = ll_cs_radio.cs_step_raw_none()
+    fill_step_raw(var s)
+    let _a = s.tones.push(ll_cs_radio.CsTone { i: -2048, q: 2047, tq: 0, present: true })
+    let _b = r.steps.push(s)
+    test.assert(r.steps[0].done)
+    test.assert_eq(r.steps[0].toa_ps, -123_456_789)
+    test.assert_eq(r.steps[0].tones[0].i as Int, -2048)
+    test.assert_eq(r.steps[0].tones[0].q as Int, 2047)
+    test.assert(r.steps[0].tones[0].present)
+
+// ── A port without the feature ───────────────────────────────────────
+
+@test
+fn test_a_port_that_writes_only_the_header_declares_no_channel_sounding()
+    var r = NoCs { unused: 0 }
+    test.assert(not r.supports_cs())
+    test.assert(not r.cs_caps().supported)
+    test.assert_eq(r.cs_caps().roles, 0)
+    test.assert_eq(r.cs_timing().max_steps, 0)
+    test.assert_eq(r.cs_timing().max_run_us, 0)
+    test.assert_eq(r.cs_cal().tx_1m_ps, 0)
+    test.assert_eq(r.cs_fae(40), 0)
+
+@test
+fn test_a_port_without_the_feature_refuses_to_load_and_to_run_a_plan()
+    var r = NoCs { unused: 0 }
+    var plan = ll_cs_radio.cs_plan_new()
+    test.assert_eq(r.cs_arm(var plan, 1_000_000), ll_cs_radio.CS_UNSUPPORTED)
+    var raw = ll_cs_radio.cs_raw_new()
+    test.assert_eq(r.cs_run(var raw), ll_cs_radio.CS_UNSUPPORTED)
+    test.assert_eq(raw.status as Int, ll_cs_radio.CS_ABORTED)
+    r.cs_abort()
+    test.assert_eq(run_one(var r, 4, 1_000_000), ll_cs_radio.CS_UNSUPPORTED)
+
+// ── A radio that overrides the methods ───────────────────────────────
+
+@test
+fn test_a_radio_with_the_feature_reports_what_it_can_do()
+    var r = fake_cs()
+    test.assert(r.supports_cs())
+    let c = r.cs_caps()
+    test.assert(c.supported)
+    test.assert_eq(c.roles, ll_cs_radio.CS_ROLES_REFLECTOR)
+    test.assert_eq(c.phys, 3)
+    test.assert_eq(c.n_aa, 255)
+    test.assert_eq(r.cs_timing().arm_lead_us, 500)
+    test.assert_eq(r.cs_timing().max_steps, 32)
+    test.assert_eq(r.cs_timing().max_run_us, 5000)
+    test.assert_eq(r.cs_cal().tx_1m_ps, 1500)
+    test.assert_eq(r.cs_fae(40), 0)
+    test.assert_eq(r.cs_fae(76), 36)
+    test.assert_eq(r.cs_fae(2), -38)
+
+@test
+fn test_a_run_of_a_loaded_plan_reports_the_steps_that_ran()
+    var r = fake_cs()
+    test.assert_eq(run_one(var r, 12, 1_000_000), 12)
+    test.assert(not r.armed)
+
+@test
+fn test_a_plan_loaded_too_late_or_too_long_is_refused_by_name()
+    var r = fake_cs()
+    test.assert_eq(run_one(var r, 12, 100), ll_cs_radio.CS_LATE)
+    test.assert_eq(run_one(var r, 33, 1_000_000), ll_cs_radio.CS_RESOURCES)
+    test.assert(not r.armed)
+
+@test
+fn test_a_run_that_a_fault_ended_is_reported_as_aborted()
+    var r = fake_cs()
+    r.fault = true
+    test.assert_eq(run_one(var r, 12, 1_000_000), ll_cs_radio.CS_ABORTED)
+    test.assert(not r.armed)
+
+@test
+fn test_a_run_with_no_plan_loaded_and_an_abort_leave_the_radio_at_rest()
+    var r = fake_cs()
+    var raw = ll_cs_radio.cs_raw_new()
+    test.assert_eq(r.cs_run(var raw), ll_cs_radio.CS_UNSUPPORTED)
+    var plan = ll_cs_radio.cs_plan_new()
+    put_steps(var plan, 3)
+    test.assert_eq(r.cs_arm(var plan, 1_000_000), ll_cs_radio.CS_OK)
+    test.assert(r.armed)
+    r.cs_abort()
+    test.assert(not r.armed)
+    test.assert_eq(r.aborted, 1)
+    test.assert_eq(r.cs_run(var raw), ll_cs_radio.CS_UNSUPPORTED)

@@ -6,7 +6,7 @@ over the traits, then runs on that chip unchanged.  This page lists what
 each trait asks, the effect a backend declares, and how to check a backend
 before it meets a radio.
 
-## The four traits
+## The five traits
 
 | Trait | The Link Layer asks it for |
 |---|---|
@@ -14,6 +14,7 @@ before it meets a radio.
 | `Radio` | the access address, CRC seed and PHY; the channel, power, whitening and ramp-up; five packet buffers; what the radio does by itself at the end of a packet; starting the transmitter or receiver; the events of a packet and the waits for them; the marks that turn an access address into a time |
 | `Cipher` | AES-CCM sealing and opening of a data PDU in place, one AES-128 block, and a count of the operations the engine failed to finish |
 | `Ecdh` | the P-256 public key of a private key, the DHKey of a private key and a peer's public key, and a count of the failures |
+| `CsRadio` | what a radio that measures reports of itself (capabilities, timing, calibration, the frequency actuation error of each channel), a plan of Channel Sounding steps to load and run, and an abort; every method has a body that answers that there is none |
 
 A chip that has no AES or P-256 engine does not implement `Cipher` or `Ecdh`
 in registers: `noble-controller` holds a software `Cipher` (`SoftCipher`),
@@ -88,6 +89,46 @@ Keys cross the interface in the order HCI carries them: X then Y, 32 octets
 each, least significant octet first.  `debug_private_key` is the private key
 of the Security Manager's Debug mode in that order.
 
+## What a CsRadio promises
+
+Channel Sounding measures the channel between two connected devices in
+procedures of subevents, each a run of steps on one RF channel after another.
+The Link Layer decides everything a subevent holds and the radio carries it
+out; the unit of the seam is the subevent, since a step lasts as little as 75
+microseconds and the transmissions keep a timing of plus or minus 1
+microsecond.  `cs_arm(plan, t0_us)` loads a `CsPlan`, whose head gives the
+role, the PHY, the step timings and the antenna paths and whose steps give the
+mode, channel, access addresses, sequences and times of each step.
+`cs_run(raw)` blocks until the last step has ended and fills a `CsRaw` with
+the raw measurements of every step: the access address quality, the signal
+strength, the times of arrival and departure in picoseconds, the frequency
+offset and the phase correction terms of each tone slot.  `cs_abort` takes the
+radio to rest from another context.  Whether the steps are sequenced in
+hardware or in software with hardware timers stays in the backend.
+
+- **A radio without the feature writes a header.**  `CsRadio` is a trait of
+  its own so that a port that has no Channel Sounding adds nothing to `Radio`.
+  Every method has a body that answers none: `supports_cs` is `false`, the
+  records are all zero (`cs_caps_none`, `cs_timing_none`, `cs_cal_none`),
+  `cs_arm` and `cs_run` answer `CS_UNSUPPORTED`, and `cs_abort` does nothing.
+  The impl is `impl CsRadio[] for MyAir` and nothing under it.
+- **The capabilities are what the radio runs.**  `CsCaps` mirrors the
+  capability record of LE CS Read Local Supported Capabilities, so that the
+  answer to the Host is a copy of it, cut down by what the Controller's build
+  leaves out.  The optional step timings are masks in the HCI bit order; the
+  mandatory values (T_IP 145, T_FCS 150 and T_PM 40 microseconds) have no bit
+  and always run.
+- **A plan outside the declared set is refused before the first step.**
+  `cs_arm` answers `CS_UNSUPPORTED` for a plan the capabilities do not name,
+  `CS_LATE` for a start nearer than `CsTiming.arm_lead_us` and
+  `CS_RESOURCES` for more steps than the radio takes.
+- **Delays are reported, not applied.**  The timestamps are in picoseconds from
+  the origin of the subevent; `CsCal` gives the delay from the point a
+  timestamp is taken to the antenna port, and the Link Layer subtracts it.
+- **Antenna switching is the backend's.**  The plan names the antenna path
+  permutation of each step; the backend maps a path to an element and drives
+  its switch inside the switching time.
+
 ## Checking a backend
 
 The suites under `tests/` show the shape.  `tests/ll_radio_tests.nv` holds a
@@ -95,7 +136,9 @@ radio and a clock with no registers (`FakeAir`) and a generic function over
 `R: Radio[e] + Timebase[t]` that runs an advertising event; a chip package
 can run the same function against its own backend on a bench, and
 `tests/ll_cipher_tests.nv` and `tests/ll_ecdh_tests.nv` do the same for a
-cipher and a curve.  The Controller package holds a scripted air that runs
+cipher and a curve.  `tests/ll_cs_radio_tests.nv` holds a port with the header
+alone and a radio that overrides every method of `CsRadio`, with a generic
+function in the shape of the Link Layer's use of the trait.  The Controller package holds a scripted air that runs
 its whole radio program on a PC.
 
 ## The PDU and PHY types

@@ -1,7 +1,7 @@
 [package]
 name        = "noble-radio"
 version     = "0.1.0"
-description = "The traits between the noble Link Layer and a chip (Radio, Timebase, Cipher, Ecdh) with the PDU and PHY types they name; no register, no chip."
+description = "The traits between the noble Link Layer and a chip (Radio, Timebase, Cipher, Ecdh, CsRadio) with the PDU, PHY and Channel Sounding types they name; no register, no chip."
 license     = "Apache-2.0"
 stability   = "experimental"
 category    = "networking"
@@ -20,7 +20,7 @@ target = "nrf52832-dk"
 
 [docs.pages]
 "README.md"     = "The Link Layer's seam to a chip"
-"docs/radio.md" = "What a chip implements: Radio, Timebase, Cipher and Ecdh"
+"docs/radio.md" = "What a chip implements: Radio, Timebase, Cipher, Ecdh and CsRadio"
 
 [publish]
 coverage_floor = 0
