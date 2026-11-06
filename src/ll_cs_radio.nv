@@ -8,8 +8,11 @@
 // sequences, the step times) and the radio carries it out and measures.
 //
 // The unit of the seam is the subevent.  A step lasts 75 microseconds at the shortest and the transmissions of a subevent keep a timing of
-// plus or minus 1 microsecond, so a plan of steps goes in (`cs_arm`), the radio runs it (`cs_run`) and the raw measurements come back in a
-// `CsRaw`.  Whether the radio sequences the steps in hardware or in software with hardware timers stays in the backend.
+// plus or minus 1 microsecond, so a plan goes in (the head with `cs_arm`, each step with `cs_load`), the radio runs it (`cs_run`) and the
+// raw measurements come back (the head in a `CsRaw`, each step with `cs_step_raw`).  Neither the plan nor the result is one record: the
+// steps are passed one at a time by index, so the Link Layer sizes its own storage from the number of steps its build allows and a radio
+// sizes its own from `CsTiming.max_steps`.  Whether the radio sequences the steps in hardware or in software with hardware timers stays in
+// the backend.
 //
 // A chip without Channel Sounding implements `CsRadio` with its header alone: every method has a body that answers that there is none,
 // and a Controller built over such a radio reports no Channel Sounding to the Host.  The trait is separate from `Radio` so that a port
@@ -36,7 +39,7 @@ pub const CS_ROLES_INITIATOR = 1
 pub const CS_ROLES_REFLECTOR = 2
 
 // The most steps a subevent holds ([Vol 6] Part B, Section 4.5.18.1), and the most tone slots of a step: the antenna paths, at most 4, and
-// the tone extension slot.
+// the tone extension slot.  The index of a step in `cs_load` and `cs_step_raw` runs from 0 to one below `CsPlan.n_steps`.
 pub const CS_STEPS_MAX = 160
 pub const CS_TONES_MAX = 5
 
@@ -159,8 +162,11 @@ struct CsCal
 //   perm            the antenna path permutation index
 //   aa_i, aa_r      the CS access address of each direction
 //   seq_bits        the length of the sequences, 0 for none, otherwise 32, 64, 96 or 128
-//   seq_i, seq_r    the sequence of each direction, 128 bits as two words each, the first word the first 64 bits sent
-//   start_ns, len_ns   where the step begins and how long it lasts, from the origin of the subevent
+//   seq_i0, seq_i1, seq_r0, seq_r1   the sequence of the initiator and of the reflector as two words each: bit n of the first word is
+//                   the n-th bit sent, bit n of the second word the (64 + n)-th; the bits past `seq_bits` are zero
+//   start_ns        the instant the first packet or tone of the step begins, from the origin of the subevent
+//   len_ns          the length of the step as [Vol 6] Part H, Section 4.3 gives it, which begins T_FCS before `start_ns` and ends where the
+//                   next step's T_FCS begins
 pub @value
 struct CsStep
     mode: u8
@@ -178,16 +184,16 @@ struct CsStep
     start_ns: u32
     len_ns: u32
 
-// A plan: the head, which says how the steps run, and the steps.
+// The head of a plan, which says how the steps that follow it run.
 //
 //   role            `CS_ROLE_INITIATOR` or `CS_ROLE_REFLECTOR`
 //   phy             the CS_SYNC PHY as the HCI names it: 1 LE 1M, 2 LE 2M, 3 LE 2M 2BT
 //   rtt             the RTT_Type, 0 to 6
-//   n_steps         steps in `steps`
+//   n_steps         the steps `cs_load` will be given, at most `CS_STEPS_MAX`
 //   n_mode0         the mode 0 steps among them
 //   t_ip1_us, t_ip2_us, t_fcs_us, t_pm_us, t_sw_us   the step timings in microseconds
 //   ipt             the initiator phase tone of Enhancement #1
-//   n_ap            antenna paths less one, 0 to 3
+//   n_ap            antenna paths, 1 to 4; a step with tones holds `n_ap` tone slots and the tone extension slot
 //   aci             the antenna configuration index
 //   tx_dbm          the transmit power
 //   snr_i, snr_r    the transmit power control of each side for the SNR
@@ -213,7 +219,6 @@ struct CsPlan
     snr_r: u8
     window_us: u32
     test: u32
-    steps: Vec[CsStep; CS_STEPS_MAX]
 
 // ── What the radio hands back ────────────────────────────────────────
 
@@ -236,7 +241,7 @@ struct CsTone
 //   toa_ps, tod_ps  the time of arrival and of departure of CS_SYNC from the origin of the subevent, in picoseconds, with whether each was taken
 //   ffo             the frequency offset of the peer in 0.01 ppm (mode 0, initiator), 0xC000 when not measured
 //   pct1, pct2      the phase correction terms of a sounding sequence, 24 bits each
-//   tones           the tone slots, `n_ap + 1` of them and the extension slot
+//   tones           the tone slots, `n_ap` of them and the extension slot
 pub @value
 struct CsStepRaw
     done: Bool
@@ -253,7 +258,7 @@ struct CsStepRaw
     tod_ps: Int
     tones: Vec[CsTone; CS_TONES_MAX]
 
-// The raw result of a run.
+// The head of the raw result of a run; the measurements of each step are read with `cs_step_raw`.
 //
 //   status          `CS_OK`, `CS_ABORTED` or the reason a run did not start
 //   n_done          the steps that ran
@@ -262,7 +267,6 @@ struct CsStepRaw
 //   ffo             the Frequency_Compensation the initiator applied, 0.01 ppm
 //   rpl_dbm         the reference power level, the power of a phase correction term of amplitude 2048
 //   t_ref_us        the instant taken as the origin, on the Timebase
-//   steps           the measurements of each step
 pub @value
 struct CsRaw
     status: u8
@@ -271,7 +275,6 @@ struct CsRaw
     ffo: u16
     rpl_dbm: i8
     t_ref_us: Int
-    steps: Vec[CsStepRaw; CS_STEPS_MAX]
 
 // ── The records of a radio that has none ─────────────────────────────
 
@@ -315,13 +318,13 @@ fn cs_step_new() -> CsStep
     CsStep { mode: 0, ch: 2, ext_i: false, ext_r: false, perm: 0, seq_bits: 0, aa_i: 0, aa_r: 0, seq_i0: 0, seq_i1: 0, seq_r0: 0,
              seq_r1: 0, start_ns: 0, len_ns: 0 }
 
-// A plan with no steps, for an initiator on LE 1M with the mandatory timings (T_IP 145, T_FCS 150 and T_PM 40 microseconds) and no
-// antenna switching.
+// The head of a plan with no steps, for an initiator on LE 1M with the mandatory timings (T_IP 145, T_FCS 150 and T_PM 40 microseconds)
+// and one antenna path, which is no antenna switching.
 pub @tier(embedded)
 @no_alloc
 fn cs_plan_new() -> CsPlan
     CsPlan { role: 0, phy: 1, rtt: 0, n_steps: 0, n_mode0: 0, t_ip1_us: 145, t_ip2_us: 145, t_fcs_us: 150, t_pm_us: 40, t_sw_us: 0,
-             ipt: false, n_ap: 0, aci: 0, tx_dbm: 0, snr_i: 0, snr_r: 0, window_us: 0, test: 0, steps: Vec.new() }
+             ipt: false, n_ap: 1, aci: 0, tx_dbm: 0, snr_i: 0, snr_r: 0, window_us: 0, test: 0 }
 
 // A tone slot with no tone: I and Q zero and a tone quality of not available.
 pub @tier(embedded)
@@ -345,8 +348,7 @@ fn cs_raw_new() -> CsRaw
         abort: 0,
         ffo: CS_FREQ_UNAVAILABLE,
         rpl_dbm: 0,
-        t_ref_us: 0,
-        steps: Vec.new() }
+        t_ref_us: 0 }
 
 // ── The trait ────────────────────────────────────────────────────────
 
@@ -373,13 +375,24 @@ pub trait CsRadio[s]
     fn cs_fae(var self, ch: Int) -> Int [s]
         0
 
-    // Load `plan`; the run starts at `t0_us` on the Timebase.  `CS_OK`, `CS_UNSUPPORTED`, `CS_LATE` or `CS_RESOURCES`.
+    // Take the head of a plan and clear the steps of the one before; the run starts at `t0_us` on the Timebase.  The `plan.n_steps` steps
+    // follow, each in a call of `cs_load`.  `CS_OK`, `CS_UNSUPPORTED`, `CS_LATE` or `CS_RESOURCES` (more steps than `CsTiming.max_steps`).
     fn cs_arm(var self, var plan: CsPlan, t0_us: Int) -> Int [s]
         CS_UNSUPPORTED
 
-    // Run the loaded plan to its last step, and fill `raw`.  Blocks until the run has ended.  `CS_OK`, `CS_ABORTED` or `CS_UNSUPPORTED`.
+    // Take step `i` of the plan that `cs_arm` took, `i` from 0 to `plan.n_steps - 1` in order.  `CS_OK`, or `CS_UNSUPPORTED` when no
+    // plan is armed or the step is not one this radio runs.
+    fn cs_load(var self, i: Int, var step: CsStep) -> Int [s]
+        CS_UNSUPPORTED
+
+    // Run the loaded plan to its last step, and fill the head `raw`.  Blocks until the run has ended.  `CS_OK`, `CS_ABORTED` or
+    // `CS_UNSUPPORTED`.
     fn cs_run(var self, var raw: CsRaw) -> Int [s]
         CS_UNSUPPORTED
+
+    // The measurements of step `i` of the run that ended last, written to `out`; false when there is no such step.
+    fn cs_step_raw(var self, i: Int, var out: CsStepRaw) -> Bool [s]
+        false
 
     // Take the radio to rest at once, from another context than the run's.
     fn cs_abort(var self) [s]

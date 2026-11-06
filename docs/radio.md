@@ -96,21 +96,30 @@ procedures of subevents, each a run of steps on one RF channel after another.
 The Link Layer decides everything a subevent holds and the radio carries it
 out; the unit of the seam is the subevent, since a step lasts as little as 75
 microseconds and the transmissions keep a timing of plus or minus 1
-microsecond.  `cs_arm(plan, t0_us)` loads a `CsPlan`, whose head gives the
-role, the PHY, the step timings and the antenna paths and whose steps give the
-mode, channel, access addresses, sequences and times of each step.
-`cs_run(raw)` blocks until the last step has ended and fills a `CsRaw` with
-the raw measurements of every step: the access address quality, the signal
-strength, the times of arrival and departure in picoseconds, the frequency
-offset and the phase correction terms of each tone slot.  `cs_abort` takes the
-radio to rest from another context.  Whether the steps are sequenced in
-hardware or in software with hardware timers stays in the backend.
+microsecond.  `cs_arm(plan, t0_us)` takes a `CsPlan`, the head of a plan, which
+gives the role, the PHY, the step timings and the antenna paths and says how
+many steps follow; `cs_load(i, step)` then takes each `CsStep`, which gives the
+mode, channel, access addresses, sequences and times of one step.  `cs_run(raw)`
+blocks until the last step has ended and fills a `CsRaw`, the head of the result;
+`cs_step_raw(i, out)` hands back the raw measurements of each step: the access
+address quality, the signal strength, the times of arrival and departure in
+picoseconds, the frequency offset and the phase correction terms of each tone
+slot.  `cs_abort` takes the radio to rest from another context.  Whether the
+steps are sequenced in hardware or in software with hardware timers stays in
+the backend.
+
+The plan and the result are passed a step at a time, by index, so that neither
+side's storage is fixed by the record.  The Link Layer holds as many steps as its
+build allows (the Controller's key `ctl_cs_steps`), and a radio holds as many as
+`CsTiming.max_steps` says, up to 160; a radio that sequences from its own
+registers need not keep a copy.
 
 - **A radio without the feature writes a header.**  `CsRadio` is a trait of
   its own so that a port that has no Channel Sounding adds nothing to `Radio`.
   Every method has a body that answers none: `supports_cs` is `false`, the
   records are all zero (`cs_caps_none`, `cs_timing_none`, `cs_cal_none`),
-  `cs_arm` and `cs_run` answer `CS_UNSUPPORTED`, and `cs_abort` does nothing.
+  `cs_arm`, `cs_load` and `cs_run` answer `CS_UNSUPPORTED`, `cs_step_raw`
+  answers `false`, and `cs_abort` does nothing.
   The impl is `impl CsRadio[] for MyAir` and nothing under it.
 - **The capabilities are what the radio runs.**  `CsCaps` mirrors the
   capability record of LE CS Read Local Supported Capabilities, so that the
@@ -121,13 +130,19 @@ hardware or in software with hardware timers stays in the backend.
 - **A plan outside the declared set is refused before the first step.**
   `cs_arm` answers `CS_UNSUPPORTED` for a plan the capabilities do not name,
   `CS_LATE` for a start nearer than `CsTiming.arm_lead_us` and
-  `CS_RESOURCES` for more steps than the radio takes.
+  `CS_RESOURCES` for more steps than the radio takes; `cs_load` answers
+  `CS_UNSUPPORTED` for a step the radio does not run or one out of order.
 - **Delays are reported, not applied.**  The timestamps are in picoseconds from
   the origin of the subevent; `CsCal` gives the delay from the point a
   timestamp is taken to the antenna port, and the Link Layer subtracts it.
 - **Antenna switching is the backend's.**  The plan names the antenna path
   permutation of each step; the backend maps a path to an element and drives
   its switch inside the switching time.
+- **A step's times are from the start of the subevent.**  `CsStep.start_ns` is
+  where the first packet or tone of the step begins, and `CsStep.len_ns` is the
+  length of the step as Part H, Section 4.3 gives it, which begins T_FCS before
+  `start_ns`.  A sequence is two words: bit n of the first word is the n-th bit
+  sent, bit n of the second the (64 + n)-th.
 
 ## Checking a backend
 

@@ -2,8 +2,9 @@
 // defaults of `CsRadio` as a header-only impl keeps them, and the contract as a small radio that overrides every method keeps it.
 //
 // `NoCs` is a port with no Channel Sounding: its impl is the header alone.  `FakeCs` is a radio with registers of no chip: it reports a
-// reflector that runs mode 0 and mode 1 steps, loads a plan, and answers `CS_LATE` for a start nearer than its lead.  `run_one` is a
-// generic function in the shape of the Link Layer's use of the trait: it is written over `R: CsRadio[s]` and sees only the trait.
+// reflector that runs mode 0 and mode 1 steps, takes a plan as a head and a step at a time, answers `CS_LATE` for a start nearer than its
+// lead and hands the measurements back a step at a time.  `run_one` is a generic function in the shape of the Link Layer's use of the
+// trait: it is written over `R: CsRadio[s]` and sees only the trait.
 //
 //   novo test tests/ll_cs_radio_tests.nv
 
@@ -22,12 +23,22 @@ impl CsRadio[] for NoCs
 struct FakeCs
     var armed: Bool
     var steps: Int
+    var loaded: Int
+    var channels: Int
+    var ran: Int
     var aborted: Int
     var lead: Int
     var fault: Bool
 
 fn fake_cs() -> FakeCs
-    FakeCs { armed: false, steps: 0, aborted: 0, lead: 500, fault: false }
+    FakeCs { armed: false,
+        steps: 0,
+        loaded: 0,
+        channels: 0,
+        ran: 0,
+        aborted: 0,
+        lead: 500,
+        fault: false }
 
 // The fields a `@value` record takes are written through a `var` parameter, as the Link Layer's own helpers do.
 fn fill_caps(var c: CsCaps)
@@ -58,6 +69,10 @@ fn fill_step(var s: CsStep)
     s.seq_r1 = 0x0123456789ABCDEF
     s.start_ns = 4_000_000_000
     s.len_ns = 705_000
+
+fn set_step(var s: CsStep, mode: Int, ch: Int)
+    s.mode = mode as u8
+    s.ch = ch as u8
 
 fn fill_step_raw(var s: CsStepRaw)
     s.done = true
@@ -93,6 +108,15 @@ impl CsRadio[] for FakeCs
             return ll_cs_radio.CS_RESOURCES
         self.armed = true
         self.steps = plan.n_steps as Int
+        self.loaded = 0
+        self.channels = 0
+        ll_cs_radio.CS_OK
+
+    fn cs_load(var self, i: Int, var step: CsStep) -> Int
+        if not self.armed or i != self.loaded or i >= self.steps or (step.mode as Int) > 1
+            return ll_cs_radio.CS_UNSUPPORTED
+        self.loaded = self.loaded + 1
+        self.channels = self.channels + step.ch as Int
         ll_cs_radio.CS_OK
 
     fn cs_run(var self, var raw: CsRaw) -> Int
@@ -101,21 +125,36 @@ impl CsRadio[] for FakeCs
         self.armed = false
         if self.fault
             return ll_cs_radio.CS_ABORTED
-        raw.n_done = self.steps as u8
+        self.ran = self.loaded
+        raw.n_done = self.loaded as u8
         raw.status = ll_cs_radio.CS_OK as u8
         ll_cs_radio.CS_OK
+
+    fn cs_step_raw(var self, i: Int, var out: CsStepRaw) -> Bool
+        if i < 0 or i >= self.ran
+            return false
+        out.done = true
+        out.rssi_dbm = (-40 - i) as i8
+        true
 
     fn cs_abort(var self)
         self.aborted = self.aborted + 1
         self.armed = false
 
-// Load a plan of `n` steps at `t0_us` and run it; the status of the first call that did not succeed, or the number of steps that ran.
+// Load a plan of `n` steps, each of mode 1 on channel 20, at `t0_us` and run it; the status of the first call that did not succeed, or the
+// number of steps that ran.
 fn run_one<R: CsRadio[s]>(var r: R, n: Int, t0_us: Int) -> Int [s]
     var plan = ll_cs_radio.cs_plan_new()
     put_steps(var plan, n)
     let a = r.cs_arm(var plan, t0_us)
     if a != ll_cs_radio.CS_OK
         return a
+    for i in 0..n
+        var step = ll_cs_radio.cs_step_new()
+        set_step(var step, 1, 20)
+        let l = r.cs_load(i, var step)
+        if l != ll_cs_radio.CS_OK
+            return l
     var raw = ll_cs_radio.cs_raw_new()
     let s = r.cs_run(var raw)
     if s != ll_cs_radio.CS_OK
@@ -232,29 +271,24 @@ fn test_a_new_plan_is_an_initiator_on_le_1m_with_the_mandatory_timings_and_no_st
     test.assert_eq(p.t_pm_us as Int, 40)
     test.assert_eq(p.t_sw_us as Int, 0)
     test.assert(not p.ipt)
-    test.assert_eq(p.n_ap as Int, 0)
+    test.assert_eq(p.n_ap as Int, 1)
     test.assert_eq(p.aci as Int, 0)
     test.assert_eq(p.tx_dbm as Int, 0)
     test.assert_eq(p.snr_i as Int + p.snr_r as Int, 0)
     test.assert_eq(p.window_us as Int, 0)
     test.assert_eq(p.test as Int, 0)
-    test.assert_eq(p.steps.len(), 0)
-    test.assert_eq(p.steps.capacity(), ll_cs_radio.CS_STEPS_MAX)
 
 @test
-fn test_a_plan_holds_its_steps()
-    var p = ll_cs_radio.cs_plan_new()
+fn test_a_step_holds_its_fields_at_their_widths()
     var s = ll_cs_radio.cs_step_new()
     fill_step(var s)
-    let _a = p.steps.push(s)
-    test.assert_eq(p.steps.len(), 1)
-    test.assert_eq(p.steps[0].mode as Int, 2)
-    test.assert_eq(p.steps[0].ch as Int, 76)
-    test.assert_eq(p.steps[0].aa_i as Int, 0xDEADBEEF)
-    test.assert_eq(p.steps[0].seq_bits as Int, 128)
-    test.assert_eq(p.steps[0].seq_r1, 0x0123456789ABCDEF)
-    test.assert_eq(p.steps[0].start_ns as Int, 4_000_000_000)
-    test.assert_eq(p.steps[0].len_ns as Int, 705_000)
+    test.assert_eq(s.mode as Int, 2)
+    test.assert_eq(s.ch as Int, 76)
+    test.assert_eq(s.aa_i as Int, 0xDEADBEEF)
+    test.assert_eq(s.seq_bits as Int, 128)
+    test.assert_eq(s.seq_r1, 0x0123456789ABCDEF)
+    test.assert_eq(s.start_ns as Int, 4_000_000_000)
+    test.assert_eq(s.len_ns as Int, 705_000)
 
 @test
 fn test_a_tone_slot_with_no_tone_has_zero_i_and_q_and_a_quality_of_not_available()
@@ -287,21 +321,17 @@ fn test_a_new_raw_result_is_an_aborted_run_with_no_step_done()
     test.assert_eq(r.ffo as Int, 0xC000)
     test.assert_eq(r.rpl_dbm as Int, 0)
     test.assert_eq(r.t_ref_us, 0)
-    test.assert_eq(r.steps.len(), 0)
-    test.assert_eq(r.steps.capacity(), ll_cs_radio.CS_STEPS_MAX)
 
 @test
-fn test_a_raw_result_holds_the_measurements_of_a_step_and_its_tones()
-    var r = ll_cs_radio.cs_raw_new()
+fn test_the_measurements_of_a_step_hold_its_tones()
     var s = ll_cs_radio.cs_step_raw_none()
     fill_step_raw(var s)
     let _a = s.tones.push(ll_cs_radio.CsTone { i: -2048, q: 2047, tq: 0, present: true })
-    let _b = r.steps.push(s)
-    test.assert(r.steps[0].done)
-    test.assert_eq(r.steps[0].toa_ps, -123_456_789)
-    test.assert_eq(r.steps[0].tones[0].i as Int, -2048)
-    test.assert_eq(r.steps[0].tones[0].q as Int, 2047)
-    test.assert(r.steps[0].tones[0].present)
+    test.assert(s.done)
+    test.assert_eq(s.toa_ps, -123_456_789)
+    test.assert_eq(s.tones[0].i as Int, -2048)
+    test.assert_eq(s.tones[0].q as Int, 2047)
+    test.assert(s.tones[0].present)
 
 // ── A port without the feature ───────────────────────────────────────
 
@@ -321,9 +351,14 @@ fn test_a_port_without_the_feature_refuses_to_load_and_to_run_a_plan()
     var r = NoCs { unused: 0 }
     var plan = ll_cs_radio.cs_plan_new()
     test.assert_eq(r.cs_arm(var plan, 1_000_000), ll_cs_radio.CS_UNSUPPORTED)
+    var step = ll_cs_radio.cs_step_new()
+    test.assert_eq(r.cs_load(0, var step), ll_cs_radio.CS_UNSUPPORTED)
     var raw = ll_cs_radio.cs_raw_new()
     test.assert_eq(r.cs_run(var raw), ll_cs_radio.CS_UNSUPPORTED)
     test.assert_eq(raw.status as Int, ll_cs_radio.CS_ABORTED)
+    var out = ll_cs_radio.cs_step_raw_none()
+    test.assert(not r.cs_step_raw(0, var out))
+    test.assert(not out.done)
     r.cs_abort()
     test.assert_eq(run_one(var r, 4, 1_000_000), ll_cs_radio.CS_UNSUPPORTED)
 
@@ -351,6 +386,34 @@ fn test_a_run_of_a_loaded_plan_reports_the_steps_that_ran()
     var r = fake_cs()
     test.assert_eq(run_one(var r, 12, 1_000_000), 12)
     test.assert(not r.armed)
+    test.assert_eq(r.channels, 12 * 20)
+
+@test
+fn test_the_measurements_of_a_run_are_read_by_index_and_only_for_the_steps_that_ran()
+    var r = fake_cs()
+    test.assert_eq(run_one(var r, 3, 1_000_000), 3)
+    var out = ll_cs_radio.cs_step_raw_none()
+    test.assert(r.cs_step_raw(2, var out))
+    test.assert(out.done)
+    test.assert_eq(out.rssi_dbm as Int, -42)
+    test.assert(not r.cs_step_raw(3, var out))
+    test.assert(not r.cs_step_raw(-1, var out))
+
+@test
+fn test_a_step_the_radio_does_not_run_or_one_out_of_order_is_refused()
+    var r = fake_cs()
+    var plan = ll_cs_radio.cs_plan_new()
+    put_steps(var plan, 2)
+    var step = ll_cs_radio.cs_step_new()
+    test.assert_eq(r.cs_load(0, var step), ll_cs_radio.CS_UNSUPPORTED)
+    test.assert_eq(r.cs_arm(var plan, 1_000_000), ll_cs_radio.CS_OK)
+    test.assert_eq(r.cs_load(1, var step), ll_cs_radio.CS_UNSUPPORTED)
+    set_step(var step, 2, 2)
+    test.assert_eq(r.cs_load(0, var step), ll_cs_radio.CS_UNSUPPORTED)
+    set_step(var step, 0, 2)
+    test.assert_eq(r.cs_load(0, var step), ll_cs_radio.CS_OK)
+    test.assert_eq(r.cs_load(1, var step), ll_cs_radio.CS_OK)
+    test.assert_eq(r.cs_load(2, var step), ll_cs_radio.CS_UNSUPPORTED)
 
 @test
 fn test_a_plan_loaded_too_late_or_too_long_is_refused_by_name()

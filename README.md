@@ -15,7 +15,7 @@ implements it.
 | `ll_radio` | `Timebase` (the clock), `Radio` (the transceiver), the constants of LE 1M, `RadioProfile` and the budgets derived from it |
 | `ll_cipher` | `Cipher` (AES-CCM and one AES-128 block) and `EncKey` |
 | `ll_ecdh` | `Ecdh` (the P-256 engine) and the Debug-mode private key of the Security Manager |
-| `ll_cs_radio` | `CsRadio` (a radio that measures, for Channel Sounding; every method has a body that answers none) and the records of its capabilities, timing, calibration, plan and raw result |
+| `ll_cs_radio` | `CsRadio` (a radio that measures, for Channel Sounding; every method has a body that answers none) and the records of its capabilities, timing, calibration, the head and the steps of a plan, and the head and the steps of a raw result |
 | `ll_pdu` | `Pdu`, a fixed buffer for one PDU, and the builders and readers of the seven legacy advertising PDU types |
 | `ll_phy` | the PHY numbers, masks and options, the time a packet takes on air, and the payload a time allows |
 
