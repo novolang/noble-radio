@@ -303,6 +303,64 @@ fn test_the_peers_fae_table_is_indexed_by_the_channels_a_procedure_uses_and_a_pl
     test.assert_eq(ll_cs_radio.cs_peer_fae(var q, 2), 9)
     test.assert_eq(ll_cs_radio.cs_peer_fae(var q, 3), 0)
 
+// Bit `n` of `v`, the n-th bit sent.
+fn bit_of(v: Int, n: Int) -> Int
+    (v >>> n) & 1
+
+@test
+fn test_a_cs_sync_packet_is_the_preamble_the_address_the_trailer_and_the_sequence()
+    // The preamble is 8 bits on LE 1M and 16 on LE 2M and LE 2M 2BT.
+    test.assert_eq(ll_cs_radio.cs_sync_preamble_bits(1), 8)
+    test.assert_eq(ll_cs_radio.cs_sync_preamble_bits(2), 16)
+    test.assert_eq(ll_cs_radio.cs_sync_preamble_bits(3), 16)
+    // 44 microseconds on LE 1M and 26 on the other two without a sequence ([Vol 6] Part H, Section 2), and each sequence length adds its bits.
+    test.assert_eq(ll_cs_radio.cs_sync_bits(1, 0), 44)
+    test.assert_eq(ll_cs_radio.cs_sync_bits(2, 0), 52)
+    test.assert_eq(ll_cs_radio.cs_sync_bits(3, 0), 52)
+    test.assert_eq(ll_cs_radio.cs_sync_bits(1, 0) * ll_cs_radio.cs_sync_bit_ns(1), 44_000)
+    test.assert_eq(ll_cs_radio.cs_sync_bits(2, 0) * ll_cs_radio.cs_sync_bit_ns(2), 26_000)
+    test.assert_eq(ll_cs_radio.cs_sync_bits(3, 0) * ll_cs_radio.cs_sync_bit_ns(3), 26_000)
+    for seq in [32, 64, 96, 128]
+        test.assert_eq(ll_cs_radio.cs_sync_bits(1, seq), 44 + seq)
+        test.assert_eq(ll_cs_radio.cs_sync_bits(2, seq), 52 + seq)
+
+@test
+fn test_the_preamble_starts_with_the_first_bit_of_the_address_and_alternates()
+    // Figure 2.2 of Part H: an address that starts with 1 has the preamble 10101010 (LE 1M) or 1010101010101010 (LE 2M) in the order sent, one that starts with 0
+    // has 01010101 and 0101010101010101.
+    test.assert_eq(ll_cs_radio.cs_sync_preamble(1, 1), 0x55)
+    test.assert_eq(ll_cs_radio.cs_sync_preamble(0, 1), 0xAA)
+    test.assert_eq(ll_cs_radio.cs_sync_preamble(1, 2), 0x5555)
+    test.assert_eq(ll_cs_radio.cs_sync_preamble(0, 2), 0xAAAA)
+    test.assert_eq(ll_cs_radio.cs_sync_preamble(1, 3), 0x5555)
+    test.assert_eq(ll_cs_radio.cs_sync_preamble(0, 3), 0xAAAA)
+    // For the addresses of the sample data: the first bit of the preamble is bit 0 of the address, every bit differs from the one before it, and the last differs
+    // from the first bit of the address.
+    for aa in [0x6C376AB8, 0xF079BC3A, 0x011CAE4E, 0xC7F8F937, 0x0C00E4AA, 0x00B8C55D]
+        for phy in [1, 2, 3]
+            let p = ll_cs_radio.cs_sync_preamble(aa, phy)
+            let n = ll_cs_radio.cs_sync_preamble_bits(phy)
+            test.assert_eq(bit_of(p, 0), bit_of(aa, 0))
+            for k in 1..n
+                test.assert(bit_of(p, k) != bit_of(p, k - 1))
+            test.assert(bit_of(p, n - 1) != bit_of(aa, 0))
+            // Nothing above the preamble.
+            test.assert_eq(p >>> n, 0)
+
+@test
+fn test_the_trailer_continues_the_alternation_after_the_last_bit_of_the_address()
+    // Figure 2.4 of Part H: 1010 in the order sent when the most significant bit of the address is 0, 0101 when it is 1.
+    test.assert_eq(ll_cs_radio.cs_sync_trailer(0x00000000), 0x5)
+    test.assert_eq(ll_cs_radio.cs_sync_trailer(0x7FFFFFFF), 0x5)
+    test.assert_eq(ll_cs_radio.cs_sync_trailer(0x80000000), 0xA)
+    test.assert_eq(ll_cs_radio.cs_sync_trailer(0xFFFFFFFF), 0xA)
+    for aa in [0x6C376AB8, 0xF079BC3A, 0x011CAE4E, 0xC7F8F937, 0x0C00E4AA, 0x00B8C55D]
+        let t = ll_cs_radio.cs_sync_trailer(aa)
+        test.assert(bit_of(t, 0) != bit_of(aa, 31))
+        for k in 1..4
+            test.assert(bit_of(t, k) != bit_of(t, k - 1))
+        test.assert_eq(t >>> 4, 0)
+
 @test
 fn test_a_step_holds_its_fields_at_their_widths()
     var s = ll_cs_radio.cs_step_new()

@@ -110,6 +110,12 @@ slot.  `cs_abort` takes the radio to rest from another context.  Whether the
 steps are sequenced in hardware or in software with hardware timers stays in
 the backend.
 
+A CS_SYNC packet is the preamble, the 32-bit access address, a trailer of 4 bits and, in a round-trip step that carries one, a sounding or a random
+sequence of `CsStep.seq_bits` bits ([Vol 6] Part H, Section 2).  The bits of a field are numbered in the order they are sent, bit 0 first: the access
+addresses of a step are `aa_i` (initiator to reflector) and `aa_r`, the sequences `seq_i0` and `seq_i1` (bits 0 to 63 and 64 to 127) and `seq_r0` and
+`seq_r1`.  `cs_sync_preamble(aa, phy)` and `cs_sync_trailer(aa)` give the preamble and the trailer of an address, `cs_sync_bits(phy, seq_bits)` the packet's
+bits and `cs_sync_bit_ns(phy)` the time of a bit, for the CS_SYNC PHY as the HCI names it (`CsPlan.phy`: 1 LE 1M, 2 LE 2M, 3 LE 2M 2BT).
+
 The plan and the result are passed a step at a time, by index, so that neither
 side's storage is fixed by the record.  The Link Layer holds as many steps as its
 build allows (the Controller's key `ctl_cs_steps`), and a radio holds as many as

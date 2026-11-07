@@ -357,6 +357,58 @@ fn cs_peer_fae(var p: CsPlan, ch: Int) -> Int
         return 0
     p.fae_peer[i] as Int
 
+// ── The CS_SYNC packet ───────────────────────────────────────────────
+//
+// A CS_SYNC packet ([Vol 6] Part H, Section 2) is the preamble, the 32-bit access address, a trailer of 4 bits and, for the round-trip steps
+// that carry one, a sounding or a random sequence of `CsStep.seq_bits` bits.  It has no PDU, no CRC and no whitening.  The bits of each
+// field are numbered in the order they are sent: bit 0 of a value is the first bit on the air.  The access addresses of a step are
+// `CsStep.aa_i` and `aa_r`, the sequences are `seq_i0`, `seq_i1`, `seq_r0` and `seq_r1`, in the same order.
+
+// The bits of the preamble of a CS_SYNC on the CS_SYNC PHY `phy` as the HCI names it (1 LE 1M, 2 LE 2M, 3 LE 2M 2BT): 8 on LE 1M and 16 on the other two.
+pub @tier(embedded)
+@no_alloc
+fn cs_sync_preamble_bits(phy: Int) -> Int
+    if phy == 1
+        return 8
+    16
+
+// The bits of a CS_SYNC on `phy` with a sequence of `seq_bits` bits (0 for none): the preamble, the access address, the trailer and the sequence.  An
+// access-address-only CS_SYNC is 40 bits on LE 1M, which take 44 microseconds, and 52 on LE 2M and LE 2M 2BT, which take 26.
+pub @tier(embedded)
+@no_alloc
+fn cs_sync_bits(phy: Int, seq_bits: Int) -> Int
+    cs_sync_preamble_bits(phy) + 32 + 4 + seq_bits
+
+// The nanoseconds a bit takes on `phy`: 1,000 on LE 1M and 500 on LE 2M and LE 2M 2BT.
+pub @tier(embedded)
+@no_alloc
+fn cs_sync_bit_ns(phy: Int) -> Int
+    if phy == 1
+        return 1000
+    500
+
+// The preamble of a CS_SYNC with the access address `aa` on `phy` ([Vol 6] Part H, Section 2.1 and Part B, Section 2.1.1): alternating bits, the first of them
+// the least significant bit of the access address, so that bit 0 of the answer is bit 0 of `aa`.  0x55 and 0xAA on LE 1M, 0x5555 and 0xAAAA on LE 2M.
+pub @tier(embedded)
+@no_alloc
+fn cs_sync_preamble(aa: Int, phy: Int) -> Int
+    var alt = 0xAAAA
+    if (aa & 1) == 1
+        alt = 0x5555
+    if phy == 1
+        return alt & 0xFF
+    alt
+
+// The trailer of a CS_SYNC with the access address `aa` ([Vol 6] Part H, Section 2.3): four bits that continue the alternation of the last bit of the access
+// address, so 1010 in the order they are sent when its most significant bit is 0 and 0101 when it is 1.  As a value with the first bit sent in bit 0, that is
+// 0x5 and 0xA.
+pub @tier(embedded)
+@no_alloc
+fn cs_sync_trailer(aa: Int) -> Int
+    if ((aa >>> 31) & 1) == 1
+        return 0xA
+    0x5
+
 // A tone slot with no tone: I and Q zero and a tone quality of not available.
 pub @tier(embedded)
 @no_alloc
