@@ -97,8 +97,10 @@ The Link Layer decides everything a subevent holds and the radio carries it
 out; the unit of the seam is the subevent, since a step lasts as little as 75
 microseconds and the transmissions keep a timing of plus or minus 1
 microsecond.  `cs_arm(plan, t0_us)` takes a `CsPlan`, the head of a plan, which
-gives the role, the PHY, the step timings and the antenna paths and says how
-many steps follow; `cs_load(i, step)` then takes each `CsStep`, which gives the
+gives the role, the PHY, the step timings and the antenna paths, the antenna
+element CS_SYNC uses (`ant_sync`), the peer's table of 72 frequency actuation
+errors when the Link Layer has it (`fae_peer`, read with `cs_peer_fae(plan, ch)`),
+and says how many steps follow; `cs_load(i, step)` then takes each `CsStep`, which gives the
 mode, channel, access addresses, sequences and times of one step.  `cs_run(raw)`
 blocks until the last step has ended and fills a `CsRaw`, the head of the result;
 `cs_step_raw(i, out)` hands back the raw measurements of each step: the access

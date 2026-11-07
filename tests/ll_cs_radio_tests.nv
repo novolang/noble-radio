@@ -277,6 +277,31 @@ fn test_a_new_plan_is_an_initiator_on_le_1m_with_the_mandatory_timings_and_no_st
     test.assert_eq(p.snr_i as Int + p.snr_r as Int, 0)
     test.assert_eq(p.window_us as Int, 0)
     test.assert_eq(p.test as Int, 0)
+    test.assert_eq(p.ant_sync as Int, 1)
+    test.assert_eq(p.fae_peer.len(), 0)
+
+@test
+fn test_the_peers_fae_table_is_indexed_by_the_channels_a_procedure_uses_and_a_plan_without_one_reads_zero()
+    test.assert_eq(ll_cs_radio.CS_FAE_COUNT, 72)
+    test.assert_eq(ll_cs_radio.cs_fae_index(2), 0)
+    test.assert_eq(ll_cs_radio.cs_fae_index(22), 20)
+    test.assert_eq(ll_cs_radio.cs_fae_index(26), 21)
+    test.assert_eq(ll_cs_radio.cs_fae_index(76), 71)
+    for ch in [0, 1, 23, 24, 25, 77, 78, 79]
+        test.assert_eq(ll_cs_radio.cs_fae_index(ch), -1)
+    var p = ll_cs_radio.cs_plan_new()
+    test.assert_eq(ll_cs_radio.cs_peer_fae(var p, 30), 0)
+    for k in 0..ll_cs_radio.CS_FAE_COUNT
+        let _a = p.fae_peer.push((k - 40) as i8)
+    test.assert_eq(ll_cs_radio.cs_peer_fae(var p, 2), -40)
+    test.assert_eq(ll_cs_radio.cs_peer_fae(var p, 26), -19)
+    test.assert_eq(ll_cs_radio.cs_peer_fae(var p, 76), 31)
+    test.assert_eq(ll_cs_radio.cs_peer_fae(var p, 24), 0)
+    // A table shorter than the channel asks for reads zero past its end.
+    var q = ll_cs_radio.cs_plan_new()
+    let _b = q.fae_peer.push(9)
+    test.assert_eq(ll_cs_radio.cs_peer_fae(var q, 2), 9)
+    test.assert_eq(ll_cs_radio.cs_peer_fae(var q, 3), 0)
 
 @test
 fn test_a_step_holds_its_fields_at_their_widths()

@@ -48,6 +48,10 @@ pub const CS_SUBEVENTS_MAX = 32
 pub const CS_PROCEDURE_STEPS_MAX = 256
 pub const CS_SEQ_BITS_MAX = 128
 
+// The values of a frequency actuation error table: one for each of the 72 channels a procedure may use ([Vol 6] Part B, Section 2.4.2.53), in the order of the
+// LL_CS_FAE_RSP, which is the order of the CS channel indices 2 to 22 and 26 to 76.  `cs_fae_index` gives a channel's place in it.
+pub const CS_FAE_COUNT = 72
+
 // The mode of a step.
 pub const CS_MODE_0 = 0
 pub const CS_MODE_1 = 1
@@ -195,6 +199,11 @@ struct CsStep
 //   ipt             the initiator phase tone of Enhancement #1
 //   n_ap            antenna paths, 1 to 4; a step with tones holds `n_ap` tone slots and the tone extension slot
 //   aci             the antenna configuration index
+//   ant_sync        the antenna element CS_SYNC uses, as the Host chose it (CS_SYNC_Antenna_Selection): 1 to 4, 0xFE for the one the Host leaves
+//                   to the Controller to alternate, 0xFF for the one the Controller picks; a radio with one antenna ignores it
+//   fae_peer        the peer's frequency actuation error table (`CS_FAE_COUNT` values in 1/32 ppm, the order of `cs_fae_index`) when the Controller
+//                   has it, from LL_CS_FAE_RSP or LE CS Write Cached Remote FAE Table; empty when it does not (the radio then assumes zero).  A radio
+//                   that compensates the mode 0 frequency offset of the peer retunes with the value of the channel of each mode 0 step
 //   tx_dbm          the transmit power
 //   snr_i, snr_r    the transmit power control of each side for the SNR
 //   window_us       how far the start of the first step may shift, from the clock accuracies
@@ -219,6 +228,8 @@ struct CsPlan
     snr_r: u8
     window_us: u32
     test: u32
+    ant_sync: u8
+    fae_peer: Vec[i8; CS_FAE_COUNT]
 
 // ── What the radio hands back ────────────────────────────────────────
 
@@ -324,7 +335,27 @@ pub @tier(embedded)
 @no_alloc
 fn cs_plan_new() -> CsPlan
     CsPlan { role: 0, phy: 1, rtt: 0, n_steps: 0, n_mode0: 0, t_ip1_us: 145, t_ip2_us: 145, t_fcs_us: 150, t_pm_us: 40, t_sw_us: 0,
-             ipt: false, n_ap: 1, aci: 0, tx_dbm: 0, snr_i: 0, snr_r: 0, window_us: 0, test: 0 }
+             ipt: false, n_ap: 1, aci: 0, tx_dbm: 0, snr_i: 0, snr_r: 0, window_us: 0, test: 0, ant_sync: 1, fae_peer: Vec.new() }
+
+// The place of the CS channel `ch` (2 to 22 or 26 to 76) in a frequency actuation error table, -1 for a channel a procedure does not use.
+pub @tier(embedded)
+@no_alloc
+fn cs_fae_index(ch: Int) -> Int
+    if ch >= 2 and ch <= 22
+        return ch - 2
+    if ch >= 26 and ch <= 76
+        return ch - 5
+    -1
+
+// The frequency actuation error of the peer on the CS channel `ch` that the plan `p` carries, in 1/32 ppm: zero when the plan has no table or the channel is not in
+// one.
+pub @tier(embedded)
+@no_alloc
+fn cs_peer_fae(var p: CsPlan, ch: Int) -> Int
+    let i = cs_fae_index(ch)
+    if i < 0 or i >= p.fae_peer.len()
+        return 0
+    p.fae_peer[i] as Int
 
 // A tone slot with no tone: I and Q zero and a tone quality of not available.
 pub @tier(embedded)

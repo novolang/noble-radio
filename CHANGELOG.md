@@ -4,6 +4,10 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## Unreleased
+
+`CsPlan` has two fields more: `ant_sync` (the antenna element CS_SYNC uses) and `fae_peer` (the peer's table of 72 frequency actuation errors in 1/32 ppm, empty when the Controller has none).  `cs_fae_index` gives a channel's place in the table and `cs_peer_fae` reads the value for a channel from a plan.  A radio that takes the peer's table into its mode 0 measurement reads it from the plan.
+
 ## 0.1.0
 
 First release.  The traits between the noble Link Layer and a chip: `Radio`
