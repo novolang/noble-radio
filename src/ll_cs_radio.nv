@@ -34,18 +34,24 @@ pub const CS_ABORTED = 4
 // The roles of a plan, and the bits of `CsCaps.roles` that name them ([Vol 4] Part E, Section 7.8.130, Roles_Supported).  The initiator
 // transmits first in every step.
 pub const CS_ROLE_INITIATOR = 0
+// The role of a plan whose radio answers in every step.
 pub const CS_ROLE_REFLECTOR = 1
+// The bit of `CsCaps.roles` that names the initiator role.
 pub const CS_ROLES_INITIATOR = 1
+// The bit of `CsCaps.roles` that names the reflector role.
 pub const CS_ROLES_REFLECTOR = 2
 
 // The most steps a subevent holds ([Vol 6] Part B, Section 4.5.18.1), and the most tone slots of a step: the antenna paths, at most 4, and
 // the tone extension slot.  The index of a step in `cs_load` and `cs_step_raw` runs from 0 to one below `CsPlan.n_steps`.
 pub const CS_STEPS_MAX = 160
+// The most tone slots of a step: four antenna paths and the tone extension slot.
 pub const CS_TONES_MAX = 5
 
 // The most steps, subevents and bits of a sequence a procedure holds.
 pub const CS_SUBEVENTS_MAX = 32
+// The most steps a procedure holds.
 pub const CS_PROCEDURE_STEPS_MAX = 256
+// The most bits of a sounding or random sequence.
 pub const CS_SEQ_BITS_MAX = 128
 
 // The values of a frequency actuation error table: one for each of the 72 channels a procedure may use ([Vol 6] Part B, Section 2.4.2.53), in the order of the
@@ -54,14 +60,19 @@ pub const CS_FAE_COUNT = 72
 
 // The mode of a step.
 pub const CS_MODE_0 = 0
+// Mode 1 of a step: the round-trip time.
 pub const CS_MODE_1 = 1
+// Mode 2 of a step: the phase and amplitude of a tone.
 pub const CS_MODE_2 = 2
+// Mode 3 of a step: the round-trip time and a tone together.
 pub const CS_MODE_3 = 3
 
 // What a field says when the radio did not measure it: the value the HCI events carry for a time or a frequency offset that is not
 // available ([Vol 4] Part E, Section 7.7.65.44), and the tone quality of an empty measurement.
 pub const CS_TIME_UNAVAILABLE = 0x8000
+// What a frequency offset field says when the radio did not measure it.
 pub const CS_FREQ_UNAVAILABLE = 0xC000
+// The tone quality of an empty measurement.
 pub const CS_TONE_QUALITY_UNAVAILABLE = 3
 
 // ── What a radio reports of itself ───────────────────────────────────

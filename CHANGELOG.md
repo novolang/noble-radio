@@ -4,11 +4,13 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
-## Unreleased
+## 0.1.1 — 2026-11-10
+
+`ll_cs_radio`: the seam between the Channel Sounding procedures of the Link Layer and a radio that measures.  The trait `CsRadio` (`supports_cs`, `cs_caps`, `cs_timing`, `cs_cal`, `cs_fae`, `cs_arm`, `cs_load`, `cs_run`, `cs_step_raw` and `cs_abort`) has a body for every method that answers that the radio has none, so a chip without Channel Sounding writes none of them.  The records it names are `CsCaps`, `CsTiming`, `CsCal`, `CsStep`, `CsPlan`, `CsTone`, `CsStepRaw` and `CsRaw`, with the constants `CS_OK` to `CS_ABORTED`, the roles, the modes and the limits on steps and subevents.  Nothing existing changes, and no function allocates.
 
 `cs_sync_preamble_bits`, `cs_sync_bits`, `cs_sync_bit_ns`, `cs_sync_preamble` and `cs_sync_trailer` describe a CS_SYNC packet on the three CS_SYNC PHYs: the preamble (8 bits on LE 1M, 16 on LE 2M and LE 2M 2BT, the first of them the least significant bit of the access address), the access address, the trailer (4 bits that continue the alternation of the last address bit) and the sequence, with the time a bit takes.  A backend uses them to program its packet format on LE 2M.  No behaviour changes.
 
-`CsPlan` has two fields more: `ant_sync` (the antenna element CS_SYNC uses) and `fae_peer` (the peer's table of 72 frequency actuation errors in 1/32 ppm, empty when the Controller has none).  `cs_fae_index` gives a channel's place in the table and `cs_peer_fae` reads the value for a channel from a plan.  A radio that takes the peer's table into its mode 0 measurement reads it from the plan.
+`CsPlan` carries two fields the Controller fills from the procedure: `ant_sync` (the antenna element CS_SYNC uses) and `fae_peer` (the peer's table of 72 frequency actuation errors in 1/32 ppm, empty when the Controller has none).  `cs_fae_index` gives a channel's place in the table and `cs_peer_fae` reads the value for a channel from a plan.  A radio that takes the peer's table into its mode 0 measurement reads it from the plan.
 
 ## 0.1.0
 
