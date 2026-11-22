@@ -52,17 +52,20 @@ pub const T_IFS_US = 150
 
 // The value of the interframe register of a radio that times the turn-around itself, for a transmitter on `phy` (`s8` says LE
 // Coded sends S=8) answering a packet whose coding `rx_s2` says (LE Coded with S=2; false on LE 1M and LE 2M).  A register of
-// `base_us` puts the first bit of the answer T_IFS_US after the last bit of the packet on every PHY and coding but one: a radio
-// that starts a transmitter of LE Coded S=2 `s2_late_us` later than the same register starts the other codings has the S=2
-// register shorter by that much, and when the packet it answers is S=2 as well the answer leaves `s2_after_s2_us` earlier than
-// after an S=8 packet, so the register is that much longer again.  A radio with no such differences passes 0 and 0.
+// `base_us` puts the first bit of the answer T_IFS_US after the last bit of the packet on every PHY and coding but two groups.  A
+// radio that starts a transmitter of LE Coded S=2 `s2_late_us` later than the same register starts the other codings has the S=2
+// register shorter by that much.  A radio that answers an S=2 packet `s2_after_s2_us` earlier than an S=8 packet, whatever its own
+// coding, has the register longer by that much when the packet it answers is S=2.  A radio with no such differences passes 0 and 0.
 pub @tier(embedded)
 fn tifs_register_us(base_us: Int, phy: Int, s8: Bool, rx_s2: Bool, s2_late_us: Int, s2_after_s2_us: Int) -> Int
-    if phy == ll_phy.PHY_CODED and not s8
-        if rx_s2
-            return base_us - s2_late_us + s2_after_s2_us
-        return base_us - s2_late_us
-    base_us
+    if phy != ll_phy.PHY_CODED
+        return base_us
+    var reg = base_us
+    if not s8
+        reg = reg - s2_late_us
+    if rx_s2
+        reg = reg + s2_after_s2_us
+    reg
 
 // The advertising channels' access address ([Vol 6] Part B, Section 2.1.2).
 pub const ADV_ACCESS_ADDRESS = 0x8E89BED6
@@ -232,6 +235,12 @@ pub trait Radio[e]
     // The microseconds by which the time of a received packet's access address (`mark_us`) lags the air: the receiver's chain between the antenna and
     // the event.  A packet sent at a fixed time after one received (the response slots of a subevent) is timed from the start the mark gives less this.
     fn rx_stamp_us(var self) -> Int [e]
+    // The microseconds from the first bit of a packet this radio sends on `phy` to the time its ADDRESS event marks, which a program
+    // subtracts from `mark_us` of that event to find when the packet began.  The figure for a packet it receives is `ll_phy.aa_end_us`;
+    // a radio whose transmitter raises the event at another point of an LE Coded packet than its receiver does answers the figure of
+    // its transmitter.  The answer of a radio with no such difference is `ll_phy.aa_end_us`.
+    fn tx_address_us(var self, phy: Int) -> Int [e]
+        ll_phy.aa_end_us(phy)
     // The turn-around of the last answer, in nanoseconds: from the end of the
     // packet the radio received to the first bit of the answer it sent by itself,
     // less the preamble and the access address.  `NOT_MEASURED` when the backend

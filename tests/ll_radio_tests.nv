@@ -427,17 +427,15 @@ fn test_the_worst_ramp_ups_are_the_longest_of_the_three_phys()
 // The tenths of a microsecond between the last bit of a packet and the first bit of the answer, on the air, for a radio of the
 // nRF54 family with the interframe register at `reg`, a transmitter on `phy` and a packet answered that is S=2 when `rx_s2` is
 // true (Ellisys captures of the DK against the SoftDevice Controller, 2026-11-21 and 2026-11-22): the register less 1.5
-// microseconds, 10 microseconds more when the transmitter is LE Coded with S=2 and 4 of those back when the packet answered is S=2,
-// and 0.7 microsecond more when the transmitter is LE Coded with S=8 and the packet answered is S=2.
+// microseconds, 10 microseconds more when the transmitter is LE Coded with S=2, and 4 microseconds less when the transmitter is LE
+// Coded, in either coding, and the packet answered is S=2.
 fn model_gap_tenths(reg: Int, phy: Int, s8: Bool, rx_s2: Bool) -> Int
     var adj = 0
     if phy == ll_phy.PHY_CODED
         if not s8
             adj = 100
-            if rx_s2
-                adj = 60
-        else if rx_s2
-            adj = 7
+        if rx_s2
+            adj = adj - 40
     reg * 10 - 15 + adj
 
 // A register that gives T_IFS on the air within 2 microseconds, in tenths.
@@ -449,9 +447,9 @@ fn test_the_register_of_le_coded_s2_is_shorter_by_the_late_start_and_longer_agai
     // S=2 after S=8, and after S=2.
     test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_CODED, false, false, 10, 4), 142)
     test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_CODED, false, true, 10, 4), 146)
-    // S=8 after S=8, and after S=2.
+    // S=8 after S=8, and after S=2 (the packet answered sets the shift whichever coding the answer has).
     test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_CODED, true, false, 10, 4), 152)
-    test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_CODED, true, true, 10, 4), 152)
+    test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_CODED, true, true, 10, 4), 156)
     // LE 1M and LE 2M keep the base whatever the coding flags say, and a radio with no differences keeps it on LE Coded.
     test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_1M, true, false, 10, 4), 152)
     test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_1M, false, true, 10, 4), 152)
@@ -459,6 +457,7 @@ fn test_the_register_of_le_coded_s2_is_shorter_by_the_late_start_and_longer_agai
     test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_2M, false, true, 10, 4), 152)
     test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_CODED, false, false, 0, 0), 152)
     test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_CODED, false, true, 0, 0), 152)
+    test.assert_eq(ll_radio.tifs_register_us(152, ll_phy.PHY_CODED, true, true, 0, 0), 152)
 
 @test
 fn test_the_registers_put_the_answer_t_ifs_after_the_packet_on_every_phy_and_coding_of_both_packets()
@@ -471,13 +470,15 @@ fn test_the_registers_put_the_answer_t_ifs_after_the_packet_on_every_phy_and_cod
     test.assert_eq(model_gap_tenths(142, ll_phy.PHY_CODED, false, false), 1505)
     test.assert_eq(model_gap_tenths(146, ll_phy.PHY_CODED, false, true), 1505)
     test.assert_eq(model_gap_tenths(152, ll_phy.PHY_CODED, true, false), 1505)
-    test.assert_eq(model_gap_tenths(152, ll_phy.PHY_CODED, true, true), 1512)
-    // The one register of 152 microseconds left S=2 at 160.5 after S=8 and 156.5 after S=2, and the register of 142 left S=2 after S=2
-    // at 146.5 microseconds, all outside the bound.
+    test.assert_eq(model_gap_tenths(156, ll_phy.PHY_CODED, true, true), 1505)
+    // The one register of 152 microseconds left S=2 at 160.5 after S=8 and 156.5 after S=2, the register of 142 left S=2 after S=2
+    // at 146.5 microseconds, and the register of 152 left S=8 after S=2 at 146.5, all outside the bound.
     test.assert(not gap_in_bound(model_gap_tenths(152, ll_phy.PHY_CODED, false, false)))
     test.assert(not gap_in_bound(model_gap_tenths(152, ll_phy.PHY_CODED, false, true)))
     test.assert(not gap_in_bound(model_gap_tenths(142, ll_phy.PHY_CODED, false, true)))
     test.assert_eq(model_gap_tenths(142, ll_phy.PHY_CODED, false, true), 1465)
+    test.assert(not gap_in_bound(model_gap_tenths(152, ll_phy.PHY_CODED, true, true)))
+    test.assert_eq(model_gap_tenths(152, ll_phy.PHY_CODED, true, true), 1465)
     // LE 1M and LE 2M are the register less 1.5 microseconds.
     test.assert_eq(model_gap_tenths(152, ll_phy.PHY_1M, true, false), 1505)
     test.assert_eq(model_gap_tenths(152, ll_phy.PHY_2M, false, true), 1505)
@@ -710,6 +711,15 @@ fn test_a_receiver_reports_the_crc_verdict_the_signal_and_the_marks()
     air.bad_crc = true
     air.start_rx()
     test.assert_eq(air.wait_rx(), ll_radio.RX_BAD)
+
+@test
+fn test_a_radio_that_does_not_name_its_transmitters_address_event_has_the_receivers_on_every_phy()
+    var air = fake_air(false, false)
+    test.assert_eq(air.tx_address_us(ll_phy.PHY_1M), 40)
+    test.assert_eq(air.tx_address_us(ll_phy.PHY_2M), 24)
+    test.assert_eq(air.tx_address_us(ll_phy.PHY_CODED), 376)
+    for phy in 1..4
+        test.assert_eq(air.tx_address_us(phy), ll_phy.aa_end_us(phy))
 
 @test
 fn test_octet_work_is_reported_in_nanoseconds()
