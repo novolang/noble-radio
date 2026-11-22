@@ -44,7 +44,11 @@ traits are in a `core` package and a chip implementation is not.
   the PHY and the ramp-up.
 - **The turn-around is the radio's.**  `arm(next, rssi)` makes the radio
   rest, turn to the transmitter or turn to the receiver T_IFS (150
-  microseconds) after the end of a packet, with no software in the path.
+  microseconds) after the end of a packet, with no software in the path,
+  on every PHY and coding.  A radio whose hardware interframe register
+  runs differently for one coding sets the register in `phy` and, when the
+  coding of the packet received matters, once the packet's coding is known
+  and before its last bit; the value comes from `tifs_register_us`.
   `disarm` and `halt` take the arming away.
 - **Events are cleared by name.**  `clear_all`, `clear_address`,
   `clear_packet` and `clear_done` forget the events of a packet; the waits

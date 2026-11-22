@@ -4,6 +4,10 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## Unreleased
+
+`ll_radio.tifs_register_us(base_us, phy, s8, rx_s2, s2_late_us, s2_after_s2_us)` gives the value of the interframe register of a radio that times the turn-around itself, for a transmitter on `phy` (`s8` says LE Coded sends S=8) answering a packet that is S=2 when `rx_s2` is true: `base_us` on every PHY and coding, `base_us - s2_late_us` on LE Coded with S=2 after an S=8 packet, and `base_us - s2_late_us + s2_after_s2_us` on LE Coded with S=2 after an S=2 packet, for a radio that starts the transmitter of S=2 `s2_late_us` microseconds later than that of S=8 and answers an S=2 packet `s2_after_s2_us` earlier than an S=8 packet.  A radio with no such differences passes 0 and 0.  Nothing existing changes, and the function allocates nothing.
+
 ## 0.1.1 — 2026-11-10
 
 `ll_cs_radio`: the seam between the Channel Sounding procedures of the Link Layer and a radio that measures.  The trait `CsRadio` (`supports_cs`, `cs_caps`, `cs_timing`, `cs_cal`, `cs_fae`, `cs_arm`, `cs_load`, `cs_run`, `cs_step_raw` and `cs_abort`) has a body for every method that answers that the radio has none, so a chip without Channel Sounding writes none of them.  The records it names are `CsCaps`, `CsTiming`, `CsCal`, `CsStep`, `CsPlan`, `CsTone`, `CsStepRaw` and `CsRaw`, with the constants `CS_OK` to `CS_ABORTED`, the roles, the modes and the limits on steps and subevents.  Nothing existing changes, and no function allocates.
