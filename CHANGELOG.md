@@ -6,6 +6,10 @@ consumer deciding whether to upgrade can read.
 
 ## Unreleased
 
+`ll_radio.work_us(p, base_us)` gives the time the program's own work takes on the core the radio reports: `base_us` when the core takes no more than `WORK_NS_REF` (3,000, the nRF54LM20's figure) for an octet (`Radio.octet_work_ns`), and in proportion to the time it takes when it takes more.  `lead_us` and `stream_guard_us` use it for `LEAD_WORK_US` and `STREAM_WORK_US`: a radio whose core is slower than the nRF54LM20's at 128 MHz is given a longer lead before a booking.  A radio that was not asked, one that reports 3,000 or less, and every other budget are unchanged, and no trait changed.
+
+2026-11-23: a second backend implements `Radio` and `Timebase`, the nRF52840's (`orbit/bsp/nordic/nrf52/blocks/radio_nrf52.nv`); the traits did not change.  `docs/radio.md` says which chips implement them.
+
 `ll_radio.tifs_register_us(base_us, phy, s8, rx_s2, s2_late_us, s2_after_s2_us)` gives the value of the interframe register of a radio that times the turn-around itself, for a transmitter on `phy` (`s8` says LE Coded sends S=8) answering a packet that is S=2 when `rx_s2` is true: `base_us` on every PHY and coding, `base_us - s2_late_us` on LE Coded with S=2 after an S=8 packet, and `base_us - s2_late_us + s2_after_s2_us` on LE Coded with S=2 after an S=2 packet, for a radio that starts the transmitter of S=2 `s2_late_us` microseconds later than that of S=8 and answers an S=2 packet `s2_after_s2_us` earlier than an S=8 packet.  A radio with no such differences passes 0 and 0.  Nothing existing changes, and the function allocates nothing.
 
 `ll_radio.tifs_register_us` adds `s2_after_s2_us` for a transmitter of either coding on LE Coded when the packet answered is S=2 (it was added for a transmitter of S=2 only).  `Radio.tx_address_us(phy)` gives the microseconds from the first bit of a packet the radio sends to its ADDRESS event; its body answers `ll_phy.aa_end_us(phy)`, so a radio that does not override it is unchanged.

@@ -16,6 +16,8 @@ before it meets a radio.
 | `Ecdh` | the P-256 public key of a private key, the DHKey of a private key and a peer's public key, and a count of the failures |
 | `CsRadio` | what a radio that measures reports of itself (capabilities, timing, calibration, the frequency actuation error of each channel), a plan of Channel Sounding steps to load and run, and an abort; every method has a body that answers that there is none |
 
+Two chips implement `Radio` and `Timebase`: the nRF54LM20 (`radio_nrf54.nv`) and the nRF52840 (`radio_nrf52.nv`, which needed no change to the traits).
+
 A chip that has no AES or P-256 engine does not implement `Cipher` or `Ecdh`
 in registers: `noble-controller` holds a software `Cipher` (`SoftCipher`),
 and `orbit/ble` holds a software `Ecdh` over `crypto-ble-ecc`.  A `Radio` and

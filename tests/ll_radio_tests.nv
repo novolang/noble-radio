@@ -364,6 +364,24 @@ fn test_profile_the_payload_gap_follows_the_octets_and_the_cpu_the_radio_reports
     test.assert_eq(ll_radio.payload_gap_us(ll_radio.profile_assumed(), 502), 0)
 
 @test
+fn test_profile_the_program_work_of_a_slower_core_grows_the_lead_and_the_guard_and_a_faster_core_or_an_unasked_radio_keeps_them()
+    let base = ll_radio.profile_for(true, 145, 45, ll_radio.WORK_NS_REF)
+    test.assert_eq(ll_radio.lead_us(base), 600)
+    test.assert_eq(ll_radio.stream_guard_us(base), 350)
+    // A core that takes twice as long for an octet takes twice as long for the work: 430 -> 860 and 180 -> 360.
+    let slow = ll_radio.profile_for(true, 145, 45, 2 * ll_radio.WORK_NS_REF)
+    test.assert_eq(ll_radio.work_us(slow, 430), 860)
+    test.assert_eq(ll_radio.lead_us(slow), 1030)
+    test.assert_eq(ll_radio.stream_guard_us(slow), 530)
+    // Rounded up.
+    test.assert_eq(ll_radio.work_us(ll_radio.profile_for(true, 145, 45, ll_radio.WORK_NS_REF + 1), 430), 431)
+    // A faster core and a radio that was not asked keep the figure.
+    let fast = ll_radio.profile_for(true, 145, 45, 700)
+    test.assert_eq(ll_radio.work_us(fast, 430), 430)
+    test.assert_eq(ll_radio.lead_us(fast), 600)
+    test.assert_eq(ll_radio.work_us(ll_radio.profile_assumed(), 430), 430)
+
+@test
 fn test_profile_octets_are_rounded_up_to_a_whole_microsecond()
     let p = ll_radio.profile_for(false, 145, 0, 700)
     test.assert_eq(ll_radio.octets_us(p, 0), 0)

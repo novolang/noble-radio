@@ -373,10 +373,24 @@ fn ramp_best_worst(p: RadioProfile) -> Int
     ll_phy.greater(ramp_best(p, ll_phy.PHY_1M),
         ll_phy.greater(ramp_best(p, ll_phy.PHY_2M), ramp_best(p, ll_phy.PHY_CODED)))
 
+// The time the program's work on an octet of a payload takes on the core the budgets of the shared code (`LEAD_WORK_US`, `STREAM_WORK_US`) were
+// measured for: the nRF54LM20 at 128 MHz, which reports `WORK_NS_REF` (`Radio.octet_work_ns`).
+pub const WORK_NS_REF = 3000
+
+// The time the program's own work takes on the core the radio reports: `base_us`, the figure of the core `WORK_NS_REF` is for, when the core
+// takes no more than that for an octet of a payload, and in proportion to the time it takes when it takes more.  A radio that was not asked, and one
+// whose core is faster, keep the figure.  The loops that build a PDU, the arbiter's lead and the guard before a booking run on that core, so their
+// budgets grow with it; the ramp-ups, the peer's windows and the gap between two subevents (which `payload_gap_us` grows with the octets) do not.
+pub @tier(embedded)
+fn work_us(p: RadioProfile, base_us: Int) -> Int
+    if not p.known or p.octet_ns <= WORK_NS_REF
+        return base_us
+    (base_us * p.octet_ns + WORK_NS_REF - 1) / WORK_NS_REF
+
 // The time before its start that the arbiter grants a booking the radio: the program's work and the legacy ramp-up.
 pub @tier(embedded)
 fn lead_us(p: RadioProfile) -> Int
-    LEAD_WORK_US + ramp_slow_worst(p) + RX_MARGIN_US
+    work_us(p, LEAD_WORK_US) + ramp_slow_worst(p) + RX_MARGIN_US
 
 // The time before a higher booking that a class lets go of the radio.
 pub @tier(embedded)
@@ -386,7 +400,7 @@ fn guard_us(p: RadioProfile) -> Int
 // The time before a booking that the main loop stops moving octets of the HCI stream.
 pub @tier(embedded)
 fn stream_guard_us(p: RadioProfile) -> Int
-    STREAM_WORK_US + ramp_slow_worst(p) + RX_MARGIN_US
+    work_us(p, STREAM_WORK_US) + ramp_slow_worst(p) + RX_MARGIN_US
 
 // The gap, from the end of one subevent to the start of the next on the radio, that a stream on `phy` needs:
 // the ramp-up the start uses, its margin and the program's work in between.
