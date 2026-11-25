@@ -4,7 +4,7 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
-## Unreleased
+## 0.1.2 — 2026-11-25
 
 `ll_radio.work_us(p, base_us)` gives the time the program's own work takes on the core the radio reports: `base_us` when the core takes no more than `WORK_NS_REF` (3,000, the nRF54LM20's figure) for an octet (`Radio.octet_work_ns`), and in proportion to the time it takes when it takes more.  `lead_us` and `stream_guard_us` use it for `LEAD_WORK_US` and `STREAM_WORK_US`: a radio whose core is slower than the nRF54LM20's at 128 MHz is given a longer lead before a booking.  A radio that was not asked, one that reports 3,000 or less, and every other budget are unchanged, and no trait changed.
 

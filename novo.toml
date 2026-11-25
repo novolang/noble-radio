@@ -1,6 +1,6 @@
 [package]
 name        = "noble-radio"
-version     = "0.1.1"
+version     = "0.1.2"
 description = "The traits between the noble Link Layer and a chip (Radio, Timebase, Cipher, Ecdh, CsRadio) with the PDU, PHY and Channel Sounding types they name; no register, no chip."
 license     = "Apache-2.0"
 stability   = "experimental"
